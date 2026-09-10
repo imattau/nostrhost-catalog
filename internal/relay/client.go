@@ -83,7 +83,7 @@ func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) 
 				return
 			}
 			events, err := relay.QuerySync(ctx, nostr.Filter{
-				Kinds:   []int{protocol.AppDeclarationKind},
+				Kinds:   []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind},
 				Authors: publishers,
 			})
 			if err != nil {
@@ -126,7 +126,7 @@ func (c *Client) Publish(ctx context.Context, event nostr.Event) []PublishResult
 // provided by the SDK's pool.
 func (c *Client) SubscribeAppDeclarations(ctx context.Context) <-chan nostr.RelayEvent {
 	return c.pool.SubscribeMany(ctx, c.urls, nostr.Filter{
-		Kinds: []int{protocol.AppDeclarationKind},
+		Kinds: []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind},
 	})
 }
 

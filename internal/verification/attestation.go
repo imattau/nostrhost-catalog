@@ -18,7 +18,7 @@ import (
 )
 
 // AttestationKind is provisional until registered/documented, mirroring
-// AppDeclarationKind (30078) and curation.EndorsementKind (30079).
+// AppDeclarationKind (32267; legacy 30078) and curation.EndorsementKind (30079).
 //
 // It is a parameterised replaceable event addressed by (kind, verifier
 // pubkey, d=app_id:commit). Addressing by commit, not just app_id, is the

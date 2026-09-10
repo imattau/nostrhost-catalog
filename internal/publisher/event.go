@@ -52,12 +52,19 @@ func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error)
 
 	tags := nostr.Tags{
 		{"d", metadata.AppID},
+		{"platforms", "linux"},
 		{"platform", "yunohost"},
-		{"repo", metadata.Repository},
+		{"repository", metadata.Repository},
 		{"version", metadata.Version},
 		{"commit", metadata.Commit},
 		{"manifest", metadata.ManifestHash},
 		{"content", metadata.ContentHash},
+	}
+	if metadata.Name != "" {
+		tags = append(tags, nostr.Tag{"name", metadata.Name})
+	}
+	if metadata.Description != "" {
+		tags = append(tags, nostr.Tag{"description", metadata.Description})
 	}
 	if metadata.Category != "" {
 		tags = append(tags, nostr.Tag{"category", metadata.Category})
@@ -119,7 +126,7 @@ func BuildProfile(profile Profile, privateKey string) (nostr.Event, error) {
 // version/commit/app ID from the already-built, already-signed declaration
 // event rather than taking them as separate parameters, so the note can
 // never drift from what was actually declared. declaration must be a signed
-// kind-30078 event built by BuildDeclaration for the same private key.
+// kind-32267 event built by BuildDeclaration for the same private key.
 func BuildAnnouncement(declaration nostr.Event, repository, displayName string, relays []string, privateKey string) (nostr.Event, error) {
 	if declaration.Kind != protocol.AppDeclarationKind {
 		return nostr.Event{}, fmt.Errorf("declaration is not a YunoHost app declaration")

@@ -124,7 +124,7 @@ func TestBuildAnnouncement(t *testing.T) {
 	if err := protocol.VerifySignature(event); err != nil {
 		t.Fatalf("VerifySignature() error = %v", err)
 	}
-	wantAddress := "30078:" + declaration.PubKey + ":hello_nostr"
+	wantAddress := "32267:" + declaration.PubKey + ":hello_nostr"
 	addressTag := event.Tags.GetFirst([]string{"a", wantAddress})
 	if addressTag == nil {
 		t.Fatalf("announcement missing %q a-tag, got tags %v", wantAddress, event.Tags)
@@ -164,7 +164,7 @@ func TestBuildAnnouncementForDeclaration(t *testing.T) {
 	if err := protocol.VerifySignature(event); err != nil {
 		t.Fatalf("VerifySignature() error = %v", err)
 	}
-	wantAddress := "30078:" + declaration.Publisher + ":hello_nostr"
+	wantAddress := "32267:" + declaration.Publisher + ":hello_nostr"
 	if tag := event.Tags.GetFirst([]string{"a", wantAddress}); tag == nil {
 		t.Fatalf("announcement missing %q a-tag, got tags %v", wantAddress, event.Tags)
 	}

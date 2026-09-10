@@ -40,6 +40,13 @@ func (p ExplicitPublishers) Publishers() []string {
 	return keys
 }
 
+// Allows reports whether a normalized publisher key is in the local trust
+// policy. It is used when loading the derived catalogue projection.
+func (p ExplicitPublishers) Allows(publicKey string) bool {
+	_, ok := p.trusted[publicKey]
+	return ok
+}
+
 // Validate verifies the event cryptographically, validates its declaration,
 // and applies the local publisher allow-list.
 func (p ExplicitPublishers) Validate(event nostr.Event) (protocol.AppDeclaration, error) {

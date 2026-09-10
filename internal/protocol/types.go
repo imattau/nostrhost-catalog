@@ -1,4 +1,4 @@
-// Package protocol contains the wire-level types for the MVP event schema.
+// Package protocol contains the wire-level types for the catalogue event schema.
 package protocol
 
 import (
@@ -11,7 +11,12 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-const AppDeclarationKind int = 30078
+const (
+	// AppDeclarationKind is the interoperable software-application record.
+	// Exact YunoHost release hashes remain extension tags.
+	AppDeclarationKind       int = 32267
+	LegacyAppDeclarationKind int = 30078
+)
 
 // ProfileKind and NoteKind are the standard NIP-01 kinds used to make a
 // publisher key behave like an ordinary Nostr account: a kind-0 profile
@@ -56,7 +61,7 @@ var (
 // declaration. Signature verification is deliberately kept separate because
 // it requires the selected Nostr crypto implementation.
 func ParseAppDeclaration(event Event) (AppDeclaration, error) {
-	if event.Kind != AppDeclarationKind {
+	if event.Kind != AppDeclarationKind && event.Kind != LegacyAppDeclarationKind {
 		return AppDeclaration{}, fmt.Errorf("unexpected event kind %d", event.Kind)
 	}
 	if event.CreatedAt <= 0 {
@@ -77,10 +82,18 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	if !appIDPattern.MatchString(appID) {
 		return AppDeclaration{}, fmt.Errorf("invalid app ID %q", appID)
 	}
-	if tags["platform"][0] != "yunohost" {
-		return AppDeclaration{}, fmt.Errorf("platform must be yunohost")
+	platform := firstTag(tags, "platform")
+	if platform == "" {
+		platform = firstTag(tags, "platforms")
 	}
-	if err := validateRepository(tags["repo"][0]); err != nil {
+	if platform != "yunohost" && platform != "linux" {
+		return AppDeclaration{}, fmt.Errorf("platform must identify yunohost or linux")
+	}
+	repository := firstTag(tags, "repository")
+	if repository == "" {
+		repository = firstTag(tags, "repo")
+	}
+	if err := validateRepository(repository); err != nil {
 		return AppDeclaration{}, err
 	}
 	if !commitPattern.MatchString(tags["commit"][0]) {
@@ -99,12 +112,14 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	declaration := AppDeclaration{
 		AppID:        appID,
 		Publisher:    event.PubKey,
-		Repository:   tags["repo"][0],
+		Repository:   repository,
 		Version:      tags["version"][0],
 		Commit:       tags["commit"][0],
 		ManifestHash: tags["manifest"][0],
 		ContentHash:  tags["content"][0],
 		Category:     firstTag(tags, "category"),
+		Name:         firstTag(tags, "name"),
+		Description:  firstTag(tags, "description"),
 	}
 	var metadata struct {
 		Name          string   `json:"name"`
@@ -112,8 +127,12 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 		Architectures []string `json:"architectures"`
 	}
 	if err := json.Unmarshal([]byte(event.Content), &metadata); err == nil {
-		declaration.Name = metadata.Name
-		declaration.Description = metadata.Description
+		if declaration.Name == "" {
+			declaration.Name = metadata.Name
+		}
+		if declaration.Description == "" {
+			declaration.Description = metadata.Description
+		}
 		declaration.Architectures = metadata.Architectures
 	}
 	return declaration, nil
@@ -147,10 +166,16 @@ func parseTags(raw nostr.Tags) (map[string][]string, error) {
 		}
 		values[tag[0]] = append(values[tag[0]], tag[1])
 	}
-	for _, name := range []string{"d", "platform", "repo", "version", "commit", "manifest", "content"} {
+	for _, name := range []string{"d", "version", "commit", "manifest", "content"} {
 		if len(values[name]) != 1 {
 			return nil, fmt.Errorf("required tag %q must occur exactly once", name)
 		}
+	}
+	if len(values["platform"]) == 0 && len(values["platforms"]) == 0 {
+		return nil, fmt.Errorf("required tag %q must occur at least once", "platform/platforms")
+	}
+	if len(values["repo"]) == 0 && len(values["repository"]) == 0 {
+		return nil, fmt.Errorf("required tag %q must occur at least once", "repo/repository")
 	}
 	return values, nil
 }

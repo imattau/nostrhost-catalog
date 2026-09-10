@@ -18,19 +18,35 @@ remains operational during this migration).
 | `internal/curation` | curated-lists + endorsement policy (trust filtering) |
 | `internal/repository` | package repository metadata + verification |
 | `internal/trust` | publisher/attestation trust policy |
+| `internal/catalog` | restartable trusted-declaration projection and deterministic resolution |
 | `internal/ciresult` | CI attestation result schema |
 
 These map to the roadmap's catalogue extraction list: event schema, relay
 discovery, publisher verification, attestation verification, trust filtering
 and repository resolution.
 
+The native projection can be persisted and queried with the CLI:
+
+```text
+echo '<signed kind-32267 event JSON>' | \
+  nostrhost-catalog --state /var/lib/nostrhost/catalogue.json \
+  --publishers <publisher-hex-or-npub> ingest
+nostrhost-catalog --state /var/lib/nostrhost/catalogue.json \
+  --publishers <publisher-hex-or-npub> get <app-id>
+```
+
 ## Explicitly not here (yet)
 
-The daemon-side state and command layer — `internal/catalog` (store),
-`internal/attestation`, `internal/localstate`, `internal/announce`,
+The remaining daemon-side state and command layer — `internal/attestation`, `internal/localstate`, `internal/announce`,
 `internal/reverify`, and the `cmd/nostr-catalogd` / `cmd/nostr-ynh` binaries —
 stays in the reference repo until the fork's native catalogue provider
-(roadmap stage 9) consumes this library.
+(roadmap stage 9) consumes this library. `internal/catalog` is the first
+fork-facing projection seam: it accepts only cryptographically valid,
+explicitly trusted declarations and is safe to rebuild from relay replay.
+New declarations use kind `32267` (software application); kind `30078` is
+accepted only as a legacy-read compatibility path. Release-specific
+YunoHost integrity fields remain extension tags until separate kind `30063`
+release-artifact events are added.
 
 ## Development
 

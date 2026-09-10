@@ -3,6 +3,7 @@ package publisher
 import (
 	"testing"
 
+	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 )
@@ -28,7 +29,7 @@ func TestAppAddress(t *testing.T) {
 		t.Fatalf("invalid address %q: %v", address, err)
 	}
 	pointer := value.(nostr.EntityPointer)
-	if pointer.Identifier != "hello_nostr" || pointer.Kind != 30078 {
+	if pointer.Identifier != "hello_nostr" || pointer.Kind != protocol.AppDeclarationKind {
 		t.Fatalf("unexpected address pointer: %+v", pointer)
 	}
 }
