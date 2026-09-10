@@ -18,6 +18,27 @@ func Bootstrap(ctx context.Context, client *relay.Client, store *Store) (accepte
 			continue
 		}
 		changed, err := store.Apply(*event)
+		if err != nil {
+			log.Printf("catalogue: ignored bootstrap declaration: %v", err)
+			ignored++
+			continue
+		}
+		if !changed {
+			ignored++
+			continue
+		}
+		accepted++
+	}
+	return accepted, ignored
+}
+
+func BootstrapAttestations(ctx context.Context, client *relay.Client, store *Store) (accepted, ignored int) {
+	for _, event := range client.FetchAttestations(ctx) {
+		if event == nil {
+			ignored++
+			continue
+		}
+		changed, err := store.ApplyAttestation(*event)
 		if err != nil || !changed {
 			ignored++
 			continue
@@ -37,8 +58,12 @@ func Run(ctx context.Context, client *relay.Client, store *Store, statePath stri
 	if statePath == "" {
 		return fmt.Errorf("catalogue sync state path is empty")
 	}
-	Bootstrap(ctx, client, store)
+	accepted, ignored := Bootstrap(ctx, client, store)
+	log.Printf("catalogue: bootstrap accepted=%d ignored=%d", accepted, ignored)
+	attestationsAccepted, attestationsIgnored := BootstrapAttestations(ctx, client, store)
+	log.Printf("catalogue: attestation bootstrap accepted=%d ignored=%d", attestationsAccepted, attestationsIgnored)
 	events := client.SubscribeAppDeclarations(ctx)
+	attestationEvents := client.SubscribeAttestations(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -53,6 +78,23 @@ func Run(ctx context.Context, client *relay.Client, store *Store, statePath stri
 			changed, err := store.Apply(*relayEvent.Event)
 			if err != nil {
 				log.Printf("catalogue: ignored declaration: %v", err)
+				continue
+			}
+			if changed {
+				if err := store.Save(statePath); err != nil {
+					return err
+				}
+			}
+		case relayEvent, ok := <-attestationEvents:
+			if !ok {
+				return store.Save(statePath)
+			}
+			if relayEvent.Event == nil {
+				continue
+			}
+			changed, err := store.ApplyAttestation(*relayEvent.Event)
+			if err != nil {
+				log.Printf("catalogue: ignored attestation: %v", err)
 				continue
 			}
 			if changed {

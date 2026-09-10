@@ -5,8 +5,9 @@ package relay
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/url"
-	"sync"
+	"time"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/verification"
@@ -56,13 +57,14 @@ type PublishResult struct {
 // package deals with (app declarations, d=app_id; attestations,
 // d=app_id:commit; ...).
 func (c *Client) FetchReplaceable(ctx context.Context, kind int, publisher, identifier string) (*nostr.Event, error) {
-	results := c.pool.FetchManyReplaceable(ctx, c.urls, nostr.Filter{
-		Kinds:   []int{kind},
-		Authors: []string{publisher},
-		Tags:    nostr.TagMap{"d": {identifier}},
-	})
-	event, ok := results.Load(nostr.ReplaceableKey{PubKey: publisher, D: identifier})
-	if !ok {
+	events := c.query(ctx, nostr.Filter{Kinds: []int{kind}, Authors: []string{publisher}, Tags: nostr.TagMap{"d": {identifier}}})
+	var event *nostr.Event
+	for _, candidate := range events {
+		if event == nil || candidate.CreatedAt > event.CreatedAt {
+			event = candidate
+		}
+	}
+	if event == nil {
 		return nil, fmt.Errorf("event not found")
 	}
 	return event, nil
@@ -71,32 +73,11 @@ func (c *Client) FetchReplaceable(ctx context.Context, kind int, publisher, iden
 // FetchAppDeclarations fetches the latest declaration per publisher/app pair.
 func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) []*nostr.Event {
 	latest := make(map[nostr.ReplaceableKey]*nostr.Event)
-	fetched := make(chan []*nostr.Event, len(c.urls))
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(len(c.urls))
-	for _, url := range c.urls {
-		go func(url string) {
-			defer waitGroup.Done()
-			relay, err := c.pool.EnsureRelay(url)
-			if err != nil {
-				fetched <- nil
-				return
-			}
-			events, err := relay.QuerySync(ctx, nostr.Filter{
-				Kinds:   []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind},
-				Authors: publishers,
-			})
-			if err != nil {
-				fetched <- nil
-				return
-			}
-			fetched <- events
-		}(url)
-	}
-	waitGroup.Wait()
-	close(fetched)
-	for events := range fetched {
-		for _, event := range events {
+	// Fetch declaration kinds separately. Some local relays mishandle a
+	// multi-kind filter, and relay-side filtering is not a trust boundary in
+	// any case because Store.Apply still enforces the publisher allow-list.
+	for _, kind := range []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind} {
+		for _, event := range c.query(ctx, nostr.Filter{Kinds: []int{kind}}) {
 			key := nostr.ReplaceableKey{PubKey: event.PubKey, D: event.Tags.GetD()}
 			if current, ok := latest[key]; !ok || event.CreatedAt > current.CreatedAt {
 				latest[key] = event
@@ -108,6 +89,42 @@ func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) 
 		events = append(events, event)
 	}
 	return events
+}
+
+// FetchAttestations fetches CI attestation events for replay into the local
+// projection. Trust and declaration matching are enforced by Store.
+func (c *Client) FetchAttestations(ctx context.Context) []*nostr.Event {
+	return c.query(ctx, nostr.Filter{Kinds: []int{verification.AttestationKind}})
+}
+
+// query uses a short-lived direct relay connection for historical reads. The
+// SDK's SimplePool fetch-many-replaceable helper does not reliably return
+// events from the local control relay, while direct QuerySync is interoperable
+// with both the local relay and public relays. Pool connections remain useful
+// for publication and live subscriptions.
+func (c *Client) query(_ context.Context, filter nostr.Filter) []*nostr.Event {
+	all := make([]*nostr.Event, 0)
+	for _, url := range c.urls {
+		// Do not bind the relay connection lifetime to a signal-aware parent
+		// context. The sync command intentionally keeps that parent alive for
+		// the subscription phase, while this historical connection should be
+		// independently bounded to one query.
+		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		relay, err := nostr.RelayConnect(context.Background(), url)
+		if err != nil {
+			cancel()
+			log.Printf("catalogue relay %s: connect: %v", url, err)
+			continue
+		}
+		events, err := relay.QuerySync(queryCtx, filter)
+		cancel()
+		if err != nil {
+			log.Printf("catalogue relay %s: query: %v", url, err)
+			continue
+		}
+		all = append(all, events...)
+	}
+	return all
 }
 
 // Publish sends an already signed event to every configured relay. A partial

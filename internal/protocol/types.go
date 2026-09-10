@@ -40,6 +40,7 @@ type AppDeclaration struct {
 	AppID         string
 	Publisher     string
 	Repository    string
+	PackagePath   string
 	Version       string
 	Commit        string
 	ManifestHash  string
@@ -96,6 +97,12 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	if err := validateRepository(repository); err != nil {
 		return AppDeclaration{}, err
 	}
+	packagePath := firstTag(tags, "package")
+	if packagePath != "" {
+		if err := validatePackagePath(packagePath); err != nil {
+			return AppDeclaration{}, err
+		}
+	}
 	if !commitPattern.MatchString(tags["commit"][0]) {
 		return AppDeclaration{}, fmt.Errorf("commit must be 40-64 lowercase hexadecimal characters")
 	}
@@ -113,6 +120,7 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 		AppID:        appID,
 		Publisher:    event.PubKey,
 		Repository:   repository,
+		PackagePath:  packagePath,
 		Version:      tags["version"][0],
 		Commit:       tags["commit"][0],
 		ManifestHash: tags["manifest"][0],
@@ -184,6 +192,18 @@ func validateRepository(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path == "" {
 		return fmt.Errorf("repo must be an HTTPS repository URL")
+	}
+	return nil
+}
+
+func validatePackagePath(raw string) error {
+	if strings.HasPrefix(raw, "/") || strings.Contains(raw, "\\") {
+		return fmt.Errorf("package path must be a relative slash-separated path")
+	}
+	for _, part := range strings.Split(raw, "/") {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("package path contains an unsafe component")
+		}
 	}
 	return nil
 }

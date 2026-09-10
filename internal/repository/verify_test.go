@@ -42,6 +42,42 @@ func TestVerifyCheckedOutDirectory(t *testing.T) {
 	}
 }
 
+func TestVerifyCheckedOutDirectoryWithPackagePath(t *testing.T) {
+	directory := t.TempDir()
+	packageDir := filepath.Join(directory, "packages", "demo")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte(`{"id":"demo","version":"1.0~ynh1","name":"Demo"}`)
+	if err := os.WriteFile(filepath.Join(packageDir, "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "Test"}, {"add", "."}, {"commit", "-m", "test"}} {
+		if _, err := gitCommand(directory, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit, err := gitOutput(directory, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := packageArchive(packageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration := protocol.AppDeclaration{AppID: "demo", PackagePath: "packages/demo", Version: "1.0~ynh1", Commit: commit, ManifestHash: publisher.HashBytes(manifest), ContentHash: publisher.HashBytes(archive)}
+	parsed, err := verifyCheckedOutDirectory(context.Background(), directory, declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Manifest["id"] != "demo" {
+		t.Fatalf("unexpected manifest: %+v", parsed)
+	}
+}
+
 // TestVerifyDeclarationRespectsContextDeadlineAgainstAHungHost is a
 // regression test: VerifyDeclaration clones the declared repository over the
 // network, and a catalog listing calls it once per declared app across every

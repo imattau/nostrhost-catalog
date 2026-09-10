@@ -4,8 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/publisher"
 	"github.com/imattau/nostrhost-catalog/internal/trust"
+	"github.com/imattau/nostrhost-catalog/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -92,5 +94,33 @@ func TestStoreSaveAndLoadRoundTrip(t *testing.T) {
 	resolved, ok := loaded.Resolve("hello_nostr")
 	if !ok || resolved.Version != "1.0.0~ynh1" {
 		t.Fatalf("loaded Resolve() = (%+v, %v)", resolved, ok)
+	}
+}
+
+func TestStoreAttestationPolicyMatchesExactRevision(t *testing.T) {
+	declarationEvent := declaration(t, privateKey, "1.0.0~ynh1")
+	declarationData, err := protocol.ParseAppDeclaration(declarationEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestationEvent, err := verification.Build(declarationData.AppID, declarationData.Repository, declarationData.Commit, declarationData.ManifestHash, declarationData.ContentHash, "test-ci", "run-1", map[string]string{"package_check": "pass"}, "pass", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := trust.NewExplicitPublishers([]string{declarationEvent.PubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := New(policy)
+	if _, err := store.Apply(declarationEvent); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.ApplyAttestation(attestationEvent); err != nil || !changed {
+		t.Fatalf("ApplyAttestation() = (%v, %v)", changed, err)
+	}
+	attestationPolicy := trust.AttestationPolicy{Mode: trust.AttestationRequire, RequiredChecks: []string{"package_check"}}
+	resolved, decision, ok := store.ResolveInstallable("hello_nostr", attestationPolicy)
+	if !ok || !decision.Verified || resolved.Version != "1.0.0~ynh1" {
+		t.Fatalf("ResolveInstallable() = (%+v, %+v, %v)", resolved, decision, ok)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/trust"
+	"github.com/imattau/nostrhost-catalog/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -21,16 +22,65 @@ type Entry struct {
 	CreatedAt   nostr.Timestamp
 }
 
+type AttestationEntry struct {
+	Attestation verification.Attestation
+	EventID     string
+	CreatedAt   nostr.Timestamp
+}
+
 // Store is the fork-native catalogue projection. The relay remains the
 // source of events; this store is only a derived, restartable read model.
 type Store struct {
-	publishers trust.ExplicitPublishers
-	entries    map[string]Entry
+	publishers   trust.ExplicitPublishers
+	entries      map[string]Entry
+	attestations map[string]AttestationEntry
 }
 
 // New creates a catalogue projection with an explicit publisher allow-list.
 func New(publishers trust.ExplicitPublishers) *Store {
-	return &Store{publishers: publishers, entries: make(map[string]Entry)}
+	return &Store{publishers: publishers, entries: make(map[string]Entry), attestations: make(map[string]AttestationEntry)}
+}
+
+// ApplyAttestation validates and stores one CI attestation. It is retained
+// independently of declarations so relay replay order cannot matter.
+func (s *Store) ApplyAttestation(event nostr.Event) (bool, error) {
+	attestation, err := verification.Parse(event)
+	if err != nil {
+		return false, err
+	}
+	key := attestation.Verifier + "\x00" + attestation.AppID + "\x00" + attestation.Commit
+	if previous, ok := s.attestations[key]; ok && event.CreatedAt <= previous.CreatedAt {
+		return false, nil
+	}
+	s.attestations[key] = AttestationEntry{Attestation: attestation, EventID: event.ID, CreatedAt: event.CreatedAt}
+	return true, nil
+}
+
+// AttestationsFor returns attestations matching the declaration's complete
+// repository and content identity, not merely its app ID or commit.
+func (s *Store) AttestationsFor(declaration protocol.AppDeclaration) []verification.Attestation {
+	result := make([]verification.Attestation, 0)
+	for _, entry := range s.attestations {
+		a := entry.Attestation
+		if a.AppID == declaration.AppID && a.Repository == declaration.Repository && a.Commit == declaration.Commit && a.ManifestHash == declaration.ManifestHash && a.ContentHash == declaration.ContentHash {
+			result = append(result, a)
+		}
+	}
+	return result
+}
+
+// ResolveInstallable resolves the canonical declaration and applies the
+// configured CI-attestation policy to its exact revision.
+func (s *Store) ResolveInstallable(appID string, policy trust.AttestationPolicy) (protocol.AppDeclaration, trust.AttestationDecision, bool) {
+	declaration, ok := s.Resolve(appID)
+	if !ok {
+		return protocol.AppDeclaration{}, trust.AttestationDecision{}, false
+	}
+	decision := policy.Evaluate(s.AttestationsFor(declaration))
+	if !decision.Accepted {
+		return protocol.AppDeclaration{}, decision, false
+	}
+	return declaration, decision, true
 }
 
 // Apply validates and projects one declaration. It returns true only when
@@ -99,6 +149,17 @@ type diskEntry struct {
 	CreatedAt   nostr.Timestamp         `json:"created_at"`
 }
 
+type diskAttestation struct {
+	Attestation verification.Attestation `json:"attestation"`
+	EventID     string                   `json:"event_id"`
+	CreatedAt   nostr.Timestamp          `json:"created_at"`
+}
+
+type diskState struct {
+	Entries      []diskEntry       `json:"entries"`
+	Attestations []diskAttestation `json:"attestations"`
+}
+
 // Save writes the derived projection atomically. It intentionally stores no
 // private keys or raw untrusted events; the relay remains the replay source.
 func (s *Store) Save(path string) error {
@@ -106,7 +167,8 @@ func (s *Store) Save(path string) error {
 		return fmt.Errorf("catalogue state path is empty")
 	}
 	entries := s.Snapshot()
-	payload, err := json.Marshal(entriesToDisk(entries))
+	disks := diskState{Entries: entriesToDisk(entries), Attestations: attestationsToDisk(s.attestations)}
+	payload, err := json.Marshal(disks)
 	if err != nil {
 		return fmt.Errorf("encode catalogue state: %w", err)
 	}
@@ -144,12 +206,15 @@ func Load(path string, publishers trust.ExplicitPublishers) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read catalogue state: %w", err)
 	}
-	var saved []diskEntry
-	if err := json.Unmarshal(data, &saved); err != nil {
-		return nil, fmt.Errorf("decode catalogue state: %w", err)
+	var state diskState
+	if err := json.Unmarshal(data, &state); err != nil {
+		// Accept the original array-only projection format during upgrade.
+		if legacyErr := json.Unmarshal(data, &state.Entries); legacyErr != nil {
+			return nil, fmt.Errorf("decode catalogue state: %w", err)
+		}
 	}
 	store := New(publishers)
-	for _, item := range saved {
+	for _, item := range state.Entries {
 		if item.Declaration.AppID == "" || item.Declaration.Publisher == "" || item.EventID == "" {
 			return nil, fmt.Errorf("catalogue state contains an incomplete entry")
 		}
@@ -158,6 +223,13 @@ func Load(path string, publishers trust.ExplicitPublishers) (*Store, error) {
 		}
 		key := item.Declaration.Publisher + "\x00" + item.Declaration.AppID
 		store.entries[key] = Entry{Declaration: item.Declaration, EventID: item.EventID, CreatedAt: item.CreatedAt}
+	}
+	for _, item := range state.Attestations {
+		if item.Attestation.AppID == "" || item.Attestation.Verifier == "" || item.EventID == "" {
+			return nil, fmt.Errorf("catalogue state contains an incomplete attestation")
+		}
+		key := item.Attestation.Verifier + "\x00" + item.Attestation.AppID + "\x00" + item.Attestation.Commit
+		store.attestations[key] = AttestationEntry{Attestation: item.Attestation, EventID: item.EventID, CreatedAt: item.CreatedAt}
 	}
 	return store, nil
 }
@@ -177,5 +249,16 @@ func entriesToDisk(entries []Entry) []diskEntry {
 	for _, entry := range entries {
 		result = append(result, diskEntry{Declaration: entry.Declaration, EventID: entry.EventID, CreatedAt: entry.CreatedAt})
 	}
+	return result
+}
+
+func attestationsToDisk(entries map[string]AttestationEntry) []diskAttestation {
+	result := make([]diskAttestation, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, diskAttestation{Attestation: entry.Attestation, EventID: entry.EventID, CreatedAt: entry.CreatedAt})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Attestation.Verifier+result[i].Attestation.AppID+result[i].Attestation.Commit < result[j].Attestation.Verifier+result[j].Attestation.AppID+result[j].Attestation.Commit
+	})
 	return result
 }

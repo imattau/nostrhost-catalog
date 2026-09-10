@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -169,25 +170,44 @@ func ReadRemoteMetadata(ctx context.Context, repositoryURL, revision string) (pu
 }
 
 func verifyCheckedOutDirectory(ctx context.Context, directory string, declaration protocol.AppDeclaration) (VerifiedPackage, error) {
-	manifestBytes, err := os.ReadFile(filepath.Join(directory, "manifest.toml"))
+	packageDirectory := directory
+	if declaration.PackagePath != "" {
+		packageDirectory = filepath.Join(directory, filepath.FromSlash(declaration.PackagePath))
+		if _, err := os.Stat(packageDirectory); err != nil {
+			return VerifiedPackage{}, fmt.Errorf("package path %q: %w", declaration.PackagePath, err)
+		}
+	}
+	manifestBytes, manifestName, err := readPackageManifest(packageDirectory)
 	if err != nil {
-		return VerifiedPackage{}, fmt.Errorf("read repository manifest: %w", err)
+		return VerifiedPackage{}, err
 	}
 	if publisher.HashBytes(manifestBytes) != declaration.ManifestHash {
 		return VerifiedPackage{}, fmt.Errorf("manifest hash does not match declaration")
 	}
-	archive, err := gitCommandContext(ctx, directory, "archive", "--format=tar", "HEAD")
-	if err != nil {
-		return VerifiedPackage{}, fmt.Errorf("archive checked-out repository: %w", err)
+	var archive []byte
+	if declaration.PackagePath == "" {
+		archive, err = gitCommandContext(ctx, directory, "archive", "--format=tar", "HEAD")
+		if err != nil {
+			return VerifiedPackage{}, fmt.Errorf("archive checked-out repository: %w", err)
+		}
+	} else {
+		archive, err = packageArchive(packageDirectory)
+		if err != nil {
+			return VerifiedPackage{}, err
+		}
 	}
 	if publisher.HashBytes(archive) != declaration.ContentHash {
 		return VerifiedPackage{}, fmt.Errorf("repository content hash does not match declaration")
 	}
 	var manifest map[string]any
-	if err := toml.Unmarshal(manifestBytes, &manifest); err != nil {
+	if manifestName == "manifest.json" {
+		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+			return VerifiedPackage{}, fmt.Errorf("parse repository manifest: %w", err)
+		}
+	} else if err := toml.Unmarshal(manifestBytes, &manifest); err != nil {
 		return VerifiedPackage{}, fmt.Errorf("parse repository manifest: %w", err)
 	}
-	logo, err := readLogo(directory)
+	logo, err := readLogo(packageDirectory)
 	if err != nil {
 		return VerifiedPackage{}, err
 	}
@@ -199,6 +219,28 @@ func verifyCheckedOutDirectory(ctx context.Context, directory string, declaratio
 		}
 	}
 	return VerifiedPackage{Manifest: manifest, Logo: logo, Branch: branch}, nil
+}
+
+func readPackageManifest(directory string) ([]byte, string, error) {
+	for _, name := range []string{"manifest.toml", "manifest.json"} {
+		data, err := os.ReadFile(filepath.Join(directory, name))
+		if err == nil {
+			return data, name, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, "", fmt.Errorf("read package %s: %w", name, err)
+		}
+	}
+	return nil, "", fmt.Errorf("package manifest not found")
+}
+
+func packageArchive(directory string) ([]byte, error) {
+	command := exec.Command("tar", "--sort=name", "--mtime=UTC 1970-01-01", "--owner=0", "--group=0", "--numeric-owner", "--exclude=./catalog.toml", "-C", directory, "-cf", "-", ".")
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("archive package payload: %w", err)
+	}
+	return output, nil
 }
 
 func readLogo(directory string) ([]byte, error) {

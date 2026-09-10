@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/imattau/nostrhost-catalog/internal/catalog"
 	"github.com/imattau/nostrhost-catalog/internal/relay"
@@ -27,7 +28,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|sync")
+		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync")
 	}
 	flags := flag.NewFlagSet("nostrhost-catalog", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -65,11 +66,72 @@ func run(args []string) error {
 			return fmt.Errorf("app %q was not found", flags.Arg(1))
 		}
 		return writeJSON(os.Stdout, entry)
+	case "publish":
+		return publish(*relayList, os.Stdin)
 	case "sync":
 		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList))
 	default:
 		return fmt.Errorf("unknown command %q", flags.Arg(0))
 	}
+}
+
+type publishResult struct {
+	Relay string `json:"relay"`
+	Error string `json:"error,omitempty"`
+}
+
+// publish sends one already-signed event to every configured relay. Signing
+// remains deliberately separate: the catalogue CLI never accepts private
+// keys, so a publisher can use its own offline signing workflow and this
+// command only handles transport and propagation reporting.
+func publish(relayURLs string, input io.Reader) error {
+	urls := splitNonEmpty(relayURLs)
+	if len(urls) == 0 {
+		return errors.New("publish requires --relay URL")
+	}
+	var event nostr.Event
+	if err := json.NewDecoder(input).Decode(&event); err != nil {
+		return fmt.Errorf("decode signed event: %w", err)
+	}
+	if !event.CheckID() {
+		return errors.New("validate signed event: event ID does not match canonical serialization")
+	}
+	valid, err := event.CheckSignature()
+	if err != nil {
+		return fmt.Errorf("validate signed event signature: %w", err)
+	}
+	if !valid {
+		return errors.New("validate signed event signature: signature is invalid")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client, err := relay.New(ctx, urls)
+	if err != nil {
+		return err
+	}
+	results := client.Publish(ctx, event)
+	output := make([]publishResult, 0, len(results))
+	failed := 0
+	for _, result := range results {
+		item := publishResult{Relay: result.Relay}
+		if result.Error != nil {
+			item.Error = result.Error.Error()
+			failed++
+		}
+		output = append(output, item)
+	}
+	if err := writeJSON(os.Stdout, map[string]any{
+		"event_id":  event.ID,
+		"published": len(results) - failed,
+		"failed":    failed,
+		"relays":    output,
+	}); err != nil {
+		return err
+	}
+	if failed > 0 {
+		return fmt.Errorf("event publication failed on %d of %d relays", failed, len(results))
+	}
+	return nil
 }
 
 func syncCatalog(statePath string, publishers, relayURLs []string) error {

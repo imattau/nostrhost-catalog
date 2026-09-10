@@ -20,6 +20,7 @@ import (
 type Metadata struct {
 	AppID         string
 	Repository    string
+	PackagePath   string
 	Version       string
 	Commit        string
 	ManifestHash  string
@@ -59,6 +60,9 @@ func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error)
 		{"commit", metadata.Commit},
 		{"manifest", metadata.ManifestHash},
 		{"content", metadata.ContentHash},
+	}
+	if metadata.PackagePath != "" {
+		tags = append(tags, nostr.Tag{"package", metadata.PackagePath})
 	}
 	if metadata.Name != "" {
 		tags = append(tags, nostr.Tag{"name", metadata.Name})
