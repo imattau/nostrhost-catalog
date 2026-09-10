@@ -35,6 +35,15 @@ nostrhost-catalog --state /var/lib/nostrhost/catalogue.json \
   --publishers <publisher-hex-or-npub> get <app-id>
 ```
 
+## Daemon deployment
+
+`deploy/nostrhost-catalog.service` provides the restart-safe systemd wrapper
+for `sync`. Install the binary as `/usr/bin/nostrhost-catalog`, copy
+`deploy/catalogue.env.example` to `/etc/nostrhost/catalogue.env`, set the
+trusted publisher keys, then enable the service. The state file is written
+atomically with a private umask; relay discovery is best-effort and never
+overrides publisher or attestation policy.
+
 ## Explicitly not here (yet)
 
 The remaining daemon-side state and command layer — `internal/attestation`, `internal/localstate`, `internal/announce`,

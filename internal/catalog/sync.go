@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/imattau/nostrhost-catalog/internal/relay"
 )
@@ -62,15 +63,25 @@ func Run(ctx context.Context, client *relay.Client, store *Store, statePath stri
 	log.Printf("catalogue: bootstrap accepted=%d ignored=%d", accepted, ignored)
 	attestationsAccepted, attestationsIgnored := BootstrapAttestations(ctx, client, store)
 	log.Printf("catalogue: attestation bootstrap accepted=%d ignored=%d", attestationsAccepted, attestationsIgnored)
-	events := client.SubscribeAppDeclarations(ctx)
-	attestationEvents := client.SubscribeAttestations(ctx)
+resubscribe:
 	for {
+		events := client.SubscribeAppDeclarations(ctx)
+		attestationEvents := client.SubscribeAttestations(ctx)
 		select {
 		case <-ctx.Done():
 			return store.Save(statePath)
 		case relayEvent, ok := <-events:
 			if !ok {
-				return store.Save(statePath)
+				if err := store.Save(statePath); err != nil {
+					return err
+				}
+				if ctx.Err() != nil {
+					return nil
+				}
+				if err := waitToResubscribe(ctx); err != nil {
+					return err
+				}
+				continue resubscribe
 			}
 			if relayEvent.Event == nil {
 				continue
@@ -87,7 +98,16 @@ func Run(ctx context.Context, client *relay.Client, store *Store, statePath stri
 			}
 		case relayEvent, ok := <-attestationEvents:
 			if !ok {
-				return store.Save(statePath)
+				if err := store.Save(statePath); err != nil {
+					return err
+				}
+				if ctx.Err() != nil {
+					return nil
+				}
+				if err := waitToResubscribe(ctx); err != nil {
+					return err
+				}
+				continue resubscribe
 			}
 			if relayEvent.Event == nil {
 				continue
@@ -103,5 +123,16 @@ func Run(ctx context.Context, client *relay.Client, store *Store, statePath stri
 				}
 			}
 		}
+	}
+}
+
+func waitToResubscribe(ctx context.Context) error {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-timer.C:
+		return nil
 	}
 }

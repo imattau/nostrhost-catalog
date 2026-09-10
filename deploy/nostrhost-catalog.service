@@ -1,0 +1,21 @@
+[Unit]
+Description=NostrHost native catalogue synchronizer
+After=network-online.target nostrhost-relay.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/nostrhost/catalogue.env
+ExecStart=/usr/bin/nostrhost-catalog --state ${NOSTRHOST_CATALOG_STATE} --publishers ${NOSTRHOST_CATALOG_PUBLISHERS} --relay ${NOSTRHOST_CATALOG_RELAYS} sync
+Restart=on-failure
+RestartSec=5s
+User=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/nostrhost
+
+[Install]
+WantedBy=multi-user.target
