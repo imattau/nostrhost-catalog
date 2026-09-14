@@ -35,6 +35,21 @@ nostrhost-catalog --state /var/lib/nostrhost/catalogue.json \
   --publishers <publisher-hex-or-npub> get <app-id>
 ```
 
+`trust` (dashboard) and `reverify` (on-demand independent re-check) are
+read-only commands built entirely on top of the already-extracted packages
+above (`internal/trust`'s attestation policy and `internal/repository`'s
+`VerifyDeclaration`) - no signing capability was added to this binary, so
+the "never accept private keys" property `publish` already had still holds
+for the whole CLI:
+
+```text
+nostrhost-catalog --state /var/lib/nostrhost/catalogue.json \
+  --publishers <publisher-hex-or-npub> \
+  --attestation-policy require --min-attestations 1 trust
+nostrhost-catalog --state /var/lib/nostrhost/catalogue.json \
+  --publishers <publisher-hex-or-npub> --app-id <app-id> reverify
+```
+
 ## Daemon deployment
 
 `deploy/nostrhost-catalog.service` provides the restart-safe systemd wrapper
