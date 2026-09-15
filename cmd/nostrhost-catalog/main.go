@@ -15,9 +15,19 @@ import (
 	"time"
 
 	"github.com/imattau/nostrhost-catalog/internal/catalog"
+	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/relay"
+	"github.com/imattau/nostrhost-catalog/internal/repository"
+	"github.com/imattau/nostrhost-catalog/internal/trust"
+	"github.com/imattau/nostrhost-catalog/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
 )
+
+// reverifyTimeout bounds the on-demand git clone reverify performs - an
+// admin clicking the button waits synchronously for the response, so this
+// needs to be short enough not to look hung against a slow or unreachable
+// repository host.
+const reverifyTimeout = 20 * time.Second
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -28,13 +38,18 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync")
+		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|reverify")
 	}
 	flags := flag.NewFlagSet("nostrhost-catalog", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	statePath := flags.String("state", "/var/lib/nostrhost/catalogue.json", "projection state path")
 	publisherList := flags.String("publishers", "", "comma-separated trusted publisher hex keys or npubs")
 	relayList := flags.String("relay", "", "comma-separated relay ws:// or wss:// URLs (sync only)")
+	appID := flags.String("app-id", "", "app ID (reverify only)")
+	attestationPolicy := flags.String("attestation-policy", "off", "attestation policy mode (trust only): off|prefer|require")
+	minAttestations := flags.Int("min-attestations", 0, "minimum acceptable attestations to count a revision verified (trust only, 0 = default of 1)")
+	requiredChecks := flags.String("required-checks", "", "comma-separated required CI check names (trust only)")
+	trustedVerifiers := flags.String("trusted-verifiers", "", "comma-separated trusted attestation verifier keys (trust only, empty = trust any verifier)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -70,9 +85,94 @@ func run(args []string) error {
 		return publish(*relayList, os.Stdin)
 	case "sync":
 		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList))
+	case "trust":
+		if flags.NArg() > 1 {
+			return errors.New("trust takes no arguments")
+		}
+		return runTrust(store, *attestationPolicy, *minAttestations, splitNonEmpty(*requiredChecks), splitNonEmpty(*trustedVerifiers))
+	case "reverify":
+		if flags.NArg() > 1 {
+			return errors.New("reverify takes no arguments")
+		}
+		return runReverify(store, *appID)
 	default:
 		return fmt.Errorf("unknown command %q", flags.Arg(0))
 	}
+}
+
+// trustEntry is one declaration's trust picture: what this projection holds,
+// what CI-backed attestations exist for its exact revision, and what the
+// given policy decides as a result - so a declaration filtered by
+// --attestation-policy=require is explained here, not silently hidden.
+type trustEntry struct {
+	Declaration  protocol.AppDeclaration    `json:"declaration"`
+	Attestations []verification.Attestation `json:"attestations"`
+	Verified     bool                       `json:"verified"`
+	Accepted     bool                       `json:"accepted"`
+}
+
+func runTrust(store *catalog.Store, mode string, minAttestations int, requiredChecks, trustedVerifiers []string) error {
+	parsedMode, err := trust.ParseAttestationMode(mode)
+	if err != nil {
+		return err
+	}
+	policy, err := trust.NewAttestationPolicy(parsedMode, minAttestations, requiredChecks, trustedVerifiers)
+	if err != nil {
+		return err
+	}
+	snapshot := store.Snapshot()
+	entries := make([]trustEntry, 0, len(snapshot))
+	for _, entry := range snapshot {
+		attestations := store.AttestationsFor(entry.Declaration)
+		decision := policy.Evaluate(attestations)
+		entries = append(entries, trustEntry{
+			Declaration:  entry.Declaration,
+			Attestations: attestations,
+			Verified:     decision.Verified,
+			Accepted:     decision.Accepted,
+		})
+	}
+	return writeJSON(os.Stdout, entries)
+}
+
+// runReverify independently re-checks one accepted declaration on demand: it
+// re-clones the repository fresh at the declared commit and recomputes both
+// hashes, rather than trusting whatever was true at ingestion time. This
+// performs real outbound network I/O (a git clone) but only ever against a
+// repository already accepted into this projection - appID selects which
+// already-trusted revision to re-check, it cannot name an arbitrary
+// repository.
+func runReverify(store *catalog.Store, appID string) error {
+	if appID == "" {
+		return errors.New("reverify requires --app-id")
+	}
+	declaration, ok := store.Resolve(appID)
+	if !ok {
+		return fmt.Errorf("app %q was not found", appID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reverifyTimeout)
+	defer cancel()
+	verified, verifyErr := repository.VerifyDeclaration(ctx, declaration)
+	result := map[string]any{
+		"app_id":     appID,
+		"publisher":  declaration.Publisher,
+		"commit":     declaration.Commit,
+		"repository": declaration.Repository,
+		"ok":         verifyErr == nil,
+	}
+	if verifyErr != nil {
+		result["error"] = verifyErr.Error()
+	} else {
+		result["manifest"] = verified.Manifest
+		result["branch"] = verified.Branch
+	}
+	if err := writeJSON(os.Stdout, result); err != nil {
+		return err
+	}
+	if verifyErr != nil {
+		return fmt.Errorf("reverify: %w", verifyErr)
+	}
+	return nil
 }
 
 type publishResult struct {
