@@ -23,9 +23,9 @@ type Entry struct {
 }
 
 type AttestationEntry struct {
-	Attestation verification.Attestation
-	EventID     string
-	CreatedAt   nostr.Timestamp
+	Attestation verification.Attestation `json:"attestation"`
+	EventID     string                   `json:"event_id"`
+	CreatedAt   nostr.Timestamp          `json:"created_at"`
 }
 
 // Store is the fork-native catalogue projection. The relay remains the
@@ -143,21 +143,9 @@ func NewFromPublishers(keys []string) (*Store, error) {
 	return New(policy), nil
 }
 
-type diskEntry struct {
-	Declaration protocol.AppDeclaration `json:"declaration"`
-	EventID     string                  `json:"event_id"`
-	CreatedAt   nostr.Timestamp         `json:"created_at"`
-}
-
-type diskAttestation struct {
-	Attestation verification.Attestation `json:"attestation"`
-	EventID     string                   `json:"event_id"`
-	CreatedAt   nostr.Timestamp          `json:"created_at"`
-}
-
 type diskState struct {
-	Entries      []diskEntry       `json:"entries"`
-	Attestations []diskAttestation `json:"attestations"`
+	Entries      []Entry            `json:"entries"`
+	Attestations []AttestationEntry `json:"attestations"`
 }
 
 // Save writes the derived projection atomically. It intentionally stores no
@@ -166,9 +154,8 @@ func (s *Store) Save(path string) error {
 	if path == "" {
 		return fmt.Errorf("catalogue state path is empty")
 	}
-	entries := s.Snapshot()
-	disks := diskState{Entries: entriesToDisk(entries), Attestations: attestationsToDisk(s.attestations)}
-	payload, err := json.Marshal(disks)
+	state := diskState{Entries: s.Snapshot(), Attestations: attestationSnapshot(s.attestations)}
+	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode catalogue state: %w", err)
 	}
@@ -222,14 +209,14 @@ func Load(path string, publishers trust.ExplicitPublishers) (*Store, error) {
 			return nil, fmt.Errorf("catalogue state contains an untrusted publisher %s", item.Declaration.Publisher)
 		}
 		key := item.Declaration.Publisher + "\x00" + item.Declaration.AppID
-		store.entries[key] = Entry{Declaration: item.Declaration, EventID: item.EventID, CreatedAt: item.CreatedAt}
+		store.entries[key] = item
 	}
 	for _, item := range state.Attestations {
 		if item.Attestation.AppID == "" || item.Attestation.Verifier == "" || item.EventID == "" {
 			return nil, fmt.Errorf("catalogue state contains an incomplete attestation")
 		}
 		key := item.Attestation.Verifier + "\x00" + item.Attestation.AppID + "\x00" + item.Attestation.Commit
-		store.attestations[key] = AttestationEntry{Attestation: item.Attestation, EventID: item.EventID, CreatedAt: item.CreatedAt}
+		store.attestations[key] = item
 	}
 	return store, nil
 }
@@ -244,18 +231,12 @@ func LoadFromPublishers(path string, keys []string) (*Store, error) {
 	return Load(path, policy)
 }
 
-func entriesToDisk(entries []Entry) []diskEntry {
-	result := make([]diskEntry, 0, len(entries))
+// attestationSnapshot returns all attestations in stable verifier/app/commit
+// order, mirroring Snapshot's role for declaration entries.
+func attestationSnapshot(entries map[string]AttestationEntry) []AttestationEntry {
+	result := make([]AttestationEntry, 0, len(entries))
 	for _, entry := range entries {
-		result = append(result, diskEntry{Declaration: entry.Declaration, EventID: entry.EventID, CreatedAt: entry.CreatedAt})
-	}
-	return result
-}
-
-func attestationsToDisk(entries map[string]AttestationEntry) []diskAttestation {
-	result := make([]diskAttestation, 0, len(entries))
-	for _, entry := range entries {
-		result = append(result, diskAttestation{Attestation: entry.Attestation, EventID: entry.EventID, CreatedAt: entry.CreatedAt})
+		result = append(result, entry)
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Attestation.Verifier+result[i].Attestation.AppID+result[i].Attestation.Commit < result[j].Attestation.Verifier+result[j].Attestation.AppID+result[j].Attestation.Commit

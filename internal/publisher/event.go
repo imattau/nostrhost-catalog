@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
@@ -36,10 +35,6 @@ type Metadata struct {
 func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error) {
 	if err := validateMetadata(metadata); err != nil {
 		return nostr.Event{}, err
-	}
-	publicKey, err := nostr.GetPublicKey(privateKey)
-	if err != nil {
-		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
 	}
 	content := struct {
 		Name          string   `json:"name,omitempty"`
@@ -73,17 +68,7 @@ func BuildDeclaration(metadata Metadata, privateKey string) (nostr.Event, error)
 	if metadata.Category != "" {
 		tags = append(tags, nostr.Tag{"category", metadata.Category})
 	}
-	event := nostr.Event{
-		PubKey:    publicKey,
-		CreatedAt: nostr.Now(),
-		Kind:      protocol.AppDeclarationKind,
-		Tags:      tags,
-		Content:   string(contentBytes),
-	}
-	if err := event.Sign(privateKey); err != nil {
-		return nostr.Event{}, fmt.Errorf("sign app declaration: %w", err)
-	}
-	return event, nil
+	return buildAndSign(protocol.AppDeclarationKind, tags, string(contentBytes), privateKey)
 }
 
 // Profile is the publisher-side input for a kind-0 profile metadata event
@@ -103,25 +88,11 @@ type Profile struct {
 // pubkey) alone, so publishing again with updated fields simply supersedes
 // the previous profile - no address or "d" tag is needed.
 func BuildProfile(profile Profile, privateKey string) (nostr.Event, error) {
-	publicKey, err := nostr.GetPublicKey(privateKey)
-	if err != nil {
-		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
-	}
 	contentBytes, err := json.Marshal(profile)
 	if err != nil {
 		return nostr.Event{}, fmt.Errorf("encode profile content: %w", err)
 	}
-	event := nostr.Event{
-		PubKey:    publicKey,
-		CreatedAt: nostr.Now(),
-		Kind:      protocol.ProfileKind,
-		Tags:      nostr.Tags{},
-		Content:   string(contentBytes),
-	}
-	if err := event.Sign(privateKey); err != nil {
-		return nostr.Event{}, fmt.Errorf("sign profile: %w", err)
-	}
-	return event, nil
+	return buildAndSign(protocol.ProfileKind, nostr.Tags{}, string(contentBytes), privateKey)
 }
 
 // BuildAnnouncement creates and signs a kind-1 text note announcing an app
@@ -187,18 +158,31 @@ func buildAnnouncementEvent(publicKey, appID, version, commit, repository, displ
 		shortCommit = shortCommit[:7]
 	}
 	content := fmt.Sprintf("📦 %s %s published\n%s@%s\nnostr:%s", name, version, repository, shortCommit, address)
+	tags := nostr.Tags{
+		{"a", fmt.Sprintf("%d:%s:%s", protocol.AppDeclarationKind, publicKey, appID)},
+		{"r", repository},
+	}
+	return buildAndSign(protocol.NoteKind, tags, content, privateKey)
+}
+
+// buildAndSign derives the publisher's public key from privateKey, builds an
+// event of the given kind/tags/content, and signs it. It is the common
+// "derive pubkey, build event, sign" skeleton shared by every Build* function
+// in this file.
+func buildAndSign(kind int, tags nostr.Tags, content, privateKey string) (nostr.Event, error) {
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return nostr.Event{}, fmt.Errorf("derive publisher public key: %w", err)
+	}
 	event := nostr.Event{
 		PubKey:    publicKey,
 		CreatedAt: nostr.Now(),
-		Kind:      protocol.NoteKind,
-		Tags: nostr.Tags{
-			{"a", fmt.Sprintf("%d:%s:%s", protocol.AppDeclarationKind, publicKey, appID)},
-			{"r", repository},
-		},
-		Content: content,
+		Kind:      kind,
+		Tags:      tags,
+		Content:   content,
 	}
 	if err := event.Sign(privateKey); err != nil {
-		return nostr.Event{}, fmt.Errorf("sign announcement: %w", err)
+		return nostr.Event{}, fmt.Errorf("sign event: %w", err)
 	}
 	return event, nil
 }
@@ -229,16 +213,13 @@ func validateMetadata(metadata Metadata) error {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path == "" {
 		return fmt.Errorf("repository must be an HTTPS URL")
 	}
-	for name, value := range map[string]string{
-		"manifest": metadata.ManifestHash,
-		"content":  metadata.ContentHash,
-	} {
-		parts := strings.Split(value, ":")
-		if len(parts) != 2 || parts[0] != "sha256" || len(parts[1]) != 64 {
-			return fmt.Errorf("%s hash must use sha256:<64 hexadecimal characters>", name)
+	for _, name := range []string{"manifest", "content"} {
+		value := metadata.ManifestHash
+		if name == "content" {
+			value = metadata.ContentHash
 		}
-		if _, err := hex.DecodeString(parts[1]); err != nil {
-			return fmt.Errorf("%s hash must use sha256:<64 hexadecimal characters>", name)
+		if err := protocol.ValidateHash(name, value); err != nil {
+			return err
 		}
 	}
 	return nil

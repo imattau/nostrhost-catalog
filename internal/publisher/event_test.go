@@ -48,6 +48,28 @@ func TestBuildDeclarationRejectsInvalidHash(t *testing.T) {
 	}
 }
 
+// TestBuildDeclarationRejectsUppercaseHash guards against a regression of a
+// real cross-package inconsistency: BuildDeclaration's own validation used to
+// accept uppercase-hex sha256 hashes even though protocol.ParseAppDeclaration
+// and verification.Parse always required lowercase, so a publisher could
+// build and sign a declaration here that downstream validation would then
+// reject. All three now share protocol.ValidateHash and enforce the same
+// lowercase-only rule.
+func TestBuildDeclarationRejectsUppercaseHash(t *testing.T) {
+	upper := strings.ToUpper(strings.TrimPrefix(HashBytes([]byte("manifest")), "sha256:"))
+	_, err := BuildDeclaration(Metadata{
+		AppID:        "hello_nostr",
+		Repository:   "https://github.com/example/hello_nostr_ynh",
+		Version:      "1.0.0~ynh1",
+		Commit:       "cccccccccccccccccccccccccccccccccccccccc",
+		ManifestHash: "sha256:" + upper,
+		ContentHash:  HashBytes([]byte("tree")),
+	}, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err == nil {
+		t.Fatal("BuildDeclaration() accepted an uppercase-hex manifest hash")
+	}
+}
+
 const testPrivateKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestBuildProfile(t *testing.T) {
