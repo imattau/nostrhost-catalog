@@ -88,3 +88,16 @@ func TestReadRemoteMetadataIncludesGitStderrOnFailure(t *testing.T) {
 		t.Fatalf("error should include git's own stderr naming the missing branch, got: %v", err)
 	}
 }
+
+func TestValidateRevisionRejectsOptionInjection(t *testing.T) {
+	for _, bad := range []string{"-", "--upload-pack=/bin/sh", "-x", "main branch", "main\ttab"} {
+		if err := validateRevision(bad); err == nil {
+			t.Fatalf("revision %q should be rejected", bad)
+		}
+	}
+	for _, ok := range []string{"main", "v1.2.3", "feature/foo", "release-2024"} {
+		if err := validateRevision(ok); err != nil {
+			t.Fatalf("revision %q should be accepted: %v", ok, err)
+		}
+	}
+}

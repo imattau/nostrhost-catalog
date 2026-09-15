@@ -49,7 +49,7 @@ func run(args []string) error {
 	attestationPolicy := flags.String("attestation-policy", "off", "attestation policy mode (trust only): off|prefer|require")
 	minAttestations := flags.Int("min-attestations", 0, "minimum acceptable attestations to count a revision verified (trust only, 0 = default of 1)")
 	requiredChecks := flags.String("required-checks", "", "comma-separated required CI check names (trust only)")
-	trustedVerifiers := flags.String("trusted-verifiers", "", "comma-separated trusted attestation verifier keys (trust only, empty = trust any verifier)")
+	trustedVerifiers := flags.String("trusted-verifiers", "", "comma-separated trusted attestation verifier keys (trust only; prefer/require refuse to start without at least one - empty means trust nobody)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

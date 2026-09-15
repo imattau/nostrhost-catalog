@@ -106,6 +106,16 @@ func NewAttestationPolicy(mode AttestationMode, minimumAttestations int, require
 			verifiers[key] = struct{}{}
 		}
 	}
+	// Fail closed: when attestations actually affect the catalogue (prefer /
+	// require), an empty verifier set must NOT silently mean "trust any
+	// verifier" — any Nostr user could then forge a pass attestation for an
+	// existing declaration and mark it Verified. The operator must name the
+	// CI verifier keys they trust.
+	if mode != AttestationOff && len(verifiers) == 0 {
+		return AttestationPolicy{}, fmt.Errorf(
+			"attestation policy %q requires at least one trusted verifier (empty = trust any verifier is not a safe default)", mode,
+		)
+	}
 	return AttestationPolicy{
 		Mode:                mode,
 		MinimumAttestations: minimumAttestations,

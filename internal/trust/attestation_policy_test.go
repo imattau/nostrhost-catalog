@@ -208,3 +208,18 @@ func TestNewAttestationPolicyRejectsNegativeMinimum(t *testing.T) {
 		t.Fatal("NewAttestationPolicy accepted a negative minimum attestation count")
 	}
 }
+
+func TestNewAttestationPolicyFailsClosedWithoutTrustedVerifiers(t *testing.T) {
+	// M4: prefer/require must not silently mean "trust any verifier" when
+	// no trusted verifiers are configured — an attacker could otherwise
+	// forge a pass attestation for an existing declaration.
+	for _, mode := range []AttestationMode{AttestationPrefer, AttestationRequire} {
+		if _, err := NewAttestationPolicy(mode, 0, nil, nil); err == nil {
+			t.Fatalf("NewAttestationPolicy(%q) with no trusted verifiers must fail closed", mode)
+		}
+	}
+	// Off never uses attestations, so it stays valid without verifiers.
+	if _, err := NewAttestationPolicy(AttestationOff, 0, nil, nil); err != nil {
+		t.Fatalf("NewAttestationPolicy(off) without verifiers must be valid: %v", err)
+	}
+}

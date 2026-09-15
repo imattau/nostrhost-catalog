@@ -160,13 +160,32 @@ func ReadRemoteMetadata(ctx context.Context, repositoryURL, revision string) (pu
 	defer os.RemoveAll(temporaryDirectory)
 	cloneArgs := []string{"clone", "--quiet", "--filter=blob:none"}
 	if revision != "" {
-		cloneArgs = append(cloneArgs, "--branch", revision)
+		if err := validateRevision(revision); err != nil {
+			return publisher.Metadata{}, err
+		}
+		// Bind the value with `--branch=` so a revision can never be parsed
+		// as a separate git option even if it starts with '-'.
+		cloneArgs = append(cloneArgs, "--branch="+revision)
 	}
 	cloneArgs = append(cloneArgs, repositoryURL, temporaryDirectory)
 	if _, err := gitCommandContext(ctx, "", cloneArgs...); err != nil {
 		return publisher.Metadata{}, fmt.Errorf("clone repository: %w", err)
 	}
 	return ReadMetadata(temporaryDirectory)
+}
+
+// validateRevision rejects revisions that git could misparse as an option or
+// that contain whitespace/control characters (option-injection hardening).
+func validateRevision(revision string) error {
+	if strings.HasPrefix(revision, "-") {
+		return fmt.Errorf("invalid revision %q: must not start with '-'", revision)
+	}
+	for _, r := range revision {
+		if r <= ' ' || r == 0x7f {
+			return fmt.Errorf("invalid revision %q: contains whitespace or control characters", revision)
+		}
+	}
+	return nil
 }
 
 func verifyCheckedOutDirectory(ctx context.Context, directory string, declaration protocol.AppDeclaration) (VerifiedPackage, error) {
