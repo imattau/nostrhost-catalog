@@ -2,11 +2,9 @@ package curation
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // Policy defines the trusted curator set and endorsement threshold.
@@ -21,9 +19,9 @@ func NewPolicy(curators []string, minimumEndorsements int) (Policy, error) {
 	}
 	trusted := make(map[string]struct{}, len(curators))
 	for _, curator := range curators {
-		key, err := normalizeKey(curator)
+		key, err := protocol.NormalizePublicKey(curator)
 		if err != nil {
-			return Policy{}, err
+			return Policy{}, fmt.Errorf("invalid curator public key: %w", err)
 		}
 		trusted[key] = struct{}{}
 	}
@@ -118,20 +116,4 @@ func (p Policy) SelectCanonical(candidates []protocol.AppDeclaration, endorsemen
 		return nil
 	}
 	return selected
-}
-
-func normalizeKey(raw string) (string, error) {
-	key := strings.TrimSpace(raw)
-	if nostr.IsValidPublicKey(key) {
-		return key, nil
-	}
-	prefix, value, err := nip19.Decode(key)
-	if err != nil || prefix != "npub" {
-		return "", fmt.Errorf("invalid curator public key %q", raw)
-	}
-	publicKey, ok := value.(string)
-	if !ok || !nostr.IsValidPublicKey(publicKey) {
-		return "", fmt.Errorf("invalid curator npub %q", raw)
-	}
-	return publicKey, nil
 }

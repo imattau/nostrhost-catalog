@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/verification"
 )
 
@@ -98,7 +99,7 @@ func NewAttestationPolicy(mode AttestationMode, minimumAttestations int, require
 	if len(trustedVerifiers) > 0 {
 		verifiers = make(map[string]struct{}, len(trustedVerifiers))
 		for _, raw := range trustedVerifiers {
-			key, err := normalizePublicKey(raw)
+			key, err := protocol.NormalizePublicKey(raw)
 			if err != nil {
 				return AttestationPolicy{}, fmt.Errorf("trusted verifier: %w", err)
 			}

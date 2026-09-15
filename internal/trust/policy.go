@@ -4,11 +4,9 @@ package trust
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // ExplicitPublishers accepts declarations only from configured publisher
@@ -21,9 +19,9 @@ type ExplicitPublishers struct {
 func NewExplicitPublishers(keys []string) (ExplicitPublishers, error) {
 	trusted := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		publicKey, err := normalizePublicKey(key)
+		publicKey, err := protocol.NormalizePublicKey(key)
 		if err != nil {
-			return ExplicitPublishers{}, err
+			return ExplicitPublishers{}, fmt.Errorf("invalid publisher public key: %w", err)
 		}
 		trusted[publicKey] = struct{}{}
 	}
@@ -60,20 +58,4 @@ func (p ExplicitPublishers) Validate(event nostr.Event) (protocol.AppDeclaration
 		return protocol.AppDeclaration{}, err
 	}
 	return protocol.ParseAppDeclaration(event)
-}
-
-func normalizePublicKey(raw string) (string, error) {
-	key := strings.TrimSpace(raw)
-	if nostr.IsValidPublicKey(key) {
-		return key, nil
-	}
-	prefix, value, err := nip19.Decode(key)
-	if err != nil || prefix != "npub" {
-		return "", fmt.Errorf("invalid publisher public key %q", raw)
-	}
-	publicKey, ok := value.(string)
-	if !ok || !nostr.IsValidPublicKey(publicKey) {
-		return "", fmt.Errorf("invalid npub publisher key %q", raw)
-	}
-	return publicKey, nil
 }

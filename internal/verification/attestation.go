@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/nbd-wtf/go-nostr"
@@ -29,9 +28,12 @@ import (
 // for the old commit.
 const AttestationKind int = 30080
 
+// hex64Pattern and commitPattern are protocol's exported patterns, referenced
+// under their previous local names here so the rest of this file's
+// validation logic reads unchanged.
 var (
-	hex64Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	commitPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
+	hex64Pattern  = protocol.Hex64Pattern
+	commitPattern = protocol.CommitPattern
 	resultPattern = regexp.MustCompile(`^(pass|fail|error)$`)
 	checkPattern  = regexp.MustCompile(`^(pass|fail|skip|error)$`)
 )
@@ -214,10 +216,8 @@ func Address(event nostr.Event, relays []string) (string, error) {
 	return nip19.EncodeEntity(event.PubKey, event.Kind, d, relays)
 }
 
+// validateHash delegates to protocol.ValidateHash so declarations and
+// attestations enforce the exact same "sha256:<64 lowercase hex>" format.
 func validateHash(name, raw string) error {
-	parts := strings.SplitN(raw, ":", 2)
-	if len(parts) != 2 || parts[0] != "sha256" || !hex64Pattern.MatchString(parts[1]) {
-		return fmt.Errorf("%s must use sha256:<64 lowercase hexadecimal characters>", name)
-	}
-	return nil
+	return protocol.ValidateHash(name, raw)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 const (
@@ -52,10 +53,16 @@ type AppDeclaration struct {
 }
 
 var (
-	appIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-	hex64Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	appIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	// Hex64Pattern matches a 64-character lowercase hexadecimal string, such
+	// as an event ID or public key. It is exported so other packages
+	// (verification, publisher) validate hex64 strings identically instead
+	// of maintaining their own copies of the same pattern.
+	Hex64Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	hex128Pattern = regexp.MustCompile(`^[0-9a-f]{128}$`)
-	commitPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
+	// CommitPattern matches a 40-64 character lowercase hexadecimal git
+	// commit reference. Exported for the same reason as Hex64Pattern.
+	CommitPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 )
 
 // ParseAppDeclaration validates the event envelope and extracts the app
@@ -68,10 +75,10 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	if event.CreatedAt <= 0 {
 		return AppDeclaration{}, fmt.Errorf("created_at must be positive")
 	}
-	if !hex64Pattern.MatchString(event.PubKey) {
+	if !Hex64Pattern.MatchString(event.PubKey) {
 		return AppDeclaration{}, fmt.Errorf("pubkey must be 64 lowercase hexadecimal characters")
 	}
-	if !hex64Pattern.MatchString(event.ID) || !hex128Pattern.MatchString(event.Sig) {
+	if !Hex64Pattern.MatchString(event.ID) || !hex128Pattern.MatchString(event.Sig) {
 		return AppDeclaration{}, fmt.Errorf("id must be 64 and sig must be 128 lowercase hexadecimal characters")
 	}
 
@@ -103,13 +110,12 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 			return AppDeclaration{}, err
 		}
 	}
-	if !commitPattern.MatchString(tags["commit"][0]) {
+	if !CommitPattern.MatchString(tags["commit"][0]) {
 		return AppDeclaration{}, fmt.Errorf("commit must be 40-64 lowercase hexadecimal characters")
 	}
 	for _, name := range []string{"manifest", "content"} {
-		parts := strings.Split(tags[name][0], ":")
-		if len(parts) != 2 || parts[0] != "sha256" || !hex64Pattern.MatchString(parts[1]) {
-			return AppDeclaration{}, fmt.Errorf("%s must use sha256:<64 lowercase hexadecimal characters>", name)
+		if err := ValidateHash(name, tags[name][0]); err != nil {
+			return AppDeclaration{}, err
 		}
 	}
 	if err := validateContent(event.Content); err != nil {
@@ -214,6 +220,38 @@ func validateContent(raw string) error {
 		return fmt.Errorf("content must be a JSON object")
 	}
 	return nil
+}
+
+// ValidateHash checks that raw is a "sha256:<64 lowercase hexadecimal
+// characters>" digest, the format used throughout the catalogue protocol
+// (declaration manifest/content hashes and attestation manifest/content
+// hashes). name identifies the field in the returned error message.
+func ValidateHash(name, raw string) error {
+	parts := strings.SplitN(raw, ":", 2)
+	if len(parts) != 2 || parts[0] != "sha256" || !Hex64Pattern.MatchString(parts[1]) {
+		return fmt.Errorf("%s must use sha256:<64 lowercase hexadecimal characters>", name)
+	}
+	return nil
+}
+
+// NormalizePublicKey accepts a public key supplied as either lowercase hex or
+// an NIP-19 npub value and returns the normalized lowercase hex form. It is
+// shared by every local trust/curation policy that accepts operator-supplied
+// keys in either format.
+func NormalizePublicKey(raw string) (string, error) {
+	key := strings.TrimSpace(raw)
+	if nostr.IsValidPublicKey(key) {
+		return key, nil
+	}
+	prefix, value, err := nip19.Decode(key)
+	if err != nil || prefix != "npub" {
+		return "", fmt.Errorf("invalid public key %q", raw)
+	}
+	publicKey, ok := value.(string)
+	if !ok || !nostr.IsValidPublicKey(publicKey) {
+		return "", fmt.Errorf("invalid npub public key %q", raw)
+	}
+	return publicKey, nil
 }
 
 func firstTag(tags map[string][]string, name string) string {
