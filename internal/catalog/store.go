@@ -17,9 +17,9 @@ import (
 // Entry is one accepted declaration and the event metadata needed to reject
 // stale replaceable-event replays.
 type Entry struct {
-	Declaration protocol.AppDeclaration
-	EventID     string
-	CreatedAt   nostr.Timestamp
+	Declaration protocol.AppDeclaration `json:"declaration"`
+	EventID     string                  `json:"event_id"`
+	CreatedAt   nostr.Timestamp         `json:"created_at"`
 }
 
 type AttestationEntry struct {
