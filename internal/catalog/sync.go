@@ -64,16 +64,23 @@ func Run(ctx context.Context, client *relay.Client, store *Store, statePath, log
 	if statePath == "" {
 		return fmt.Errorf("catalogue sync state path is empty")
 	}
+	// Backfill logos before the relay crawl. Bootstrap reads a best-effort,
+	// potentially very large relay set and can take minutes (or stall on an
+	// unresponsive relay); app logos are derived from the already-persisted
+	// projection, so they must not be gated behind it. Entries persisted
+	// before logo extraction existed (or whose previous attempt did not
+	// complete) are filled in once here.
+	backfilled := backfillLogos(ctx, store, logoDirectory)
+	if backfilled > 0 {
+		log.Printf("catalogue: backfilled %d app logos", backfilled)
+	}
+	if err := store.Save(statePath); err != nil {
+		return err
+	}
 	accepted, ignored := Bootstrap(ctx, client, store, logoDirectory)
 	log.Printf("catalogue: bootstrap accepted=%d ignored=%d", accepted, ignored)
 	attestationsAccepted, attestationsIgnored := BootstrapAttestations(ctx, client, store)
 	log.Printf("catalogue: attestation bootstrap accepted=%d ignored=%d", attestationsAccepted, attestationsIgnored)
-	// Entries persisted before logo extraction existed (or before a previous
-	// extraction succeeded) are backfilled once so an upgrade populates logos
-	// without waiting for a declaration to change.
-	if backfilled := backfillLogos(ctx, store, logoDirectory); backfilled > 0 {
-		log.Printf("catalogue: backfilled %d app logos", backfilled)
-	}
 	if err := store.Save(statePath); err != nil {
 		return err
 	}
