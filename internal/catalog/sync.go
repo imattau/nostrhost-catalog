@@ -6,13 +6,15 @@ import (
 	"log"
 	"time"
 
+	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/relay"
+	"github.com/imattau/nostrhost-catalog/internal/repository"
 )
 
 // Bootstrap fetches the latest declaration for every configured publisher
 // from the relays. Invalid or untrusted events are ignored; relay state is
 // untrusted input and must not prevent the provider from starting.
-func Bootstrap(ctx context.Context, client *relay.Client, store *Store) (accepted, ignored int) {
+func Bootstrap(ctx context.Context, client *relay.Client, store *Store, logoDirectory string) (accepted, ignored int) {
 	for _, event := range client.FetchAppDeclarations(ctx, store.publishers.Publishers()) {
 		if event == nil {
 			ignored++
@@ -27,6 +29,9 @@ func Bootstrap(ctx context.Context, client *relay.Client, store *Store) (accepte
 		if !changed {
 			ignored++
 			continue
+		}
+		if declaration, err := store.publishers.Validate(*event); err == nil {
+			extractLogo(ctx, store, declaration, logoDirectory)
 		}
 		accepted++
 	}
@@ -52,17 +57,26 @@ func BootstrapAttestations(ctx context.Context, client *relay.Client, store *Sto
 // Run subscribes to live declarations after bootstrapping the projection.
 // It returns when ctx is canceled or when the relay subscription closes. A
 // snapshot is saved after every accepted event and once more on shutdown.
-func Run(ctx context.Context, client *relay.Client, store *Store, statePath string) error {
+func Run(ctx context.Context, client *relay.Client, store *Store, statePath, logoDirectory string) error {
 	if client == nil || store == nil {
 		return fmt.Errorf("catalogue sync requires a relay client and store")
 	}
 	if statePath == "" {
 		return fmt.Errorf("catalogue sync state path is empty")
 	}
-	accepted, ignored := Bootstrap(ctx, client, store)
+	accepted, ignored := Bootstrap(ctx, client, store, logoDirectory)
 	log.Printf("catalogue: bootstrap accepted=%d ignored=%d", accepted, ignored)
 	attestationsAccepted, attestationsIgnored := BootstrapAttestations(ctx, client, store)
 	log.Printf("catalogue: attestation bootstrap accepted=%d ignored=%d", attestationsAccepted, attestationsIgnored)
+	// Entries persisted before logo extraction existed (or before a previous
+	// extraction succeeded) are backfilled once so an upgrade populates logos
+	// without waiting for a declaration to change.
+	if backfilled := backfillLogos(ctx, store, logoDirectory); backfilled > 0 {
+		log.Printf("catalogue: backfilled %d app logos", backfilled)
+	}
+	if err := store.Save(statePath); err != nil {
+		return err
+	}
 resubscribe:
 	for {
 		events := client.SubscribeAppDeclarations(ctx)
@@ -92,6 +106,9 @@ resubscribe:
 				continue
 			}
 			if changed {
+				if declaration, err := store.publishers.Validate(*relayEvent.Event); err == nil {
+					extractLogo(ctx, store, declaration, logoDirectory)
+				}
 				if err := store.Save(statePath); err != nil {
 					return err
 				}
@@ -124,6 +141,43 @@ resubscribe:
 			}
 		}
 	}
+}
+
+// extractLogo pulls the app's optional logo.png from its declared repository
+// and records the content hash on the current projection. Failures are logged
+// and swallowed: a logo is cosmetic and must never stop a sync.
+func extractLogo(ctx context.Context, store *Store, declaration protocol.AppDeclaration, logoDirectory string) {
+	if logoDirectory == "" {
+		return
+	}
+	hash, err := repository.FetchLogo(ctx, declaration, logoDirectory)
+	if err != nil {
+		log.Printf("catalogue: logo extraction for %s failed: %v", declaration.AppID, err)
+		return
+	}
+	store.SetLogoResult(declaration.Publisher, declaration.AppID, hash)
+}
+
+// backfillLogos extracts logos for entries that predate logo extraction or
+// whose previous attempt did not complete, returning how many were updated.
+func backfillLogos(ctx context.Context, store *Store, logoDirectory string) int {
+	if logoDirectory == "" {
+		return 0
+	}
+	updated := 0
+	for _, entry := range store.Snapshot() {
+		if entry.LogoChecked {
+			continue
+		}
+		hash, err := repository.FetchLogo(ctx, entry.Declaration, logoDirectory)
+		if err != nil {
+			log.Printf("catalogue: logo backfill for %s failed: %v", entry.Declaration.AppID, err)
+			continue
+		}
+		store.SetLogoResult(entry.Declaration.Publisher, entry.Declaration.AppID, hash)
+		updated++
+	}
+	return updated
 }
 
 func waitToResubscribe(ctx context.Context) error {

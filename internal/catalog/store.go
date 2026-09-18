@@ -15,11 +15,17 @@ import (
 )
 
 // Entry is one accepted declaration and the event metadata needed to reject
-// stale replaceable-event replays.
+// stale replaceable-event replays. LogoHash is the sha256 of the app's
+// optional logo.png, extracted from the declared repository and served by the
+// portal at /nostrhost/sso/applogos/<hash>.png; LogoChecked records that the
+// repository was inspected even when it ships no logo, so a restart does not
+// re-clone logo-less repositories forever.
 type Entry struct {
 	Declaration protocol.AppDeclaration `json:"declaration"`
 	EventID     string                  `json:"event_id"`
 	CreatedAt   nostr.Timestamp         `json:"created_at"`
+	LogoHash    string                  `json:"logo_hash,omitempty"`
+	LogoChecked bool                    `json:"logo_checked,omitempty"`
 }
 
 type AttestationEntry struct {
@@ -96,6 +102,21 @@ func (s *Store) Apply(event nostr.Event) (bool, error) {
 	}
 	s.entries[key] = Entry{Declaration: declaration, EventID: event.ID, CreatedAt: event.CreatedAt}
 	return true, nil
+}
+
+// SetLogoResult records the outcome of extracting an app's optional logo for
+// the current (publisher, appID) projection. An empty hash means the
+// declaration was checked and ships no usable logo; either way the entry is
+// marked checked so the extractor does not re-clone a logo-less repository.
+func (s *Store) SetLogoResult(publisher, appID, hash string) {
+	key := publisher + "\x00" + appID
+	entry, ok := s.entries[key]
+	if !ok {
+		return
+	}
+	entry.LogoHash = hash
+	entry.LogoChecked = true
+	s.entries[key] = entry
 }
 
 // Resolve returns the newest trusted declaration for an app ID. If several

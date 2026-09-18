@@ -1,8 +1,10 @@
 package catalog
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/publisher"
@@ -122,5 +124,81 @@ func TestStoreAttestationPolicyMatchesExactRevision(t *testing.T) {
 	resolved, decision, ok := store.ResolveInstallable("hello_nostr", attestationPolicy)
 	if !ok || !decision.Verified || resolved.Version != "1.0.0~ynh1" {
 		t.Fatalf("ResolveInstallable() = (%+v, %+v, %v)", resolved, decision, ok)
+	}
+}
+
+func TestStoreRecordsAndPersistsLogoResult(t *testing.T) {
+	event := declaration(t, privateKey, "1.0.0~ynh1")
+	policy, err := trust.NewExplicitPublishers([]string{event.PubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := New(policy)
+	if _, err := store.Apply(event); err != nil {
+		t.Fatal(err)
+	}
+	hash := publisher.HashBytes([]byte("logo-bytes"))
+	store.SetLogoResult(event.PubKey, "hello_nostr", hash)
+
+	entries := store.Snapshot()
+	if len(entries) != 1 || entries[0].LogoHash != hash || !entries[0].LogoChecked {
+		t.Fatalf("Snapshot() = %+v", entries)
+	}
+
+	path := filepath.Join(t.TempDir(), "catalogue.json")
+	if err := store.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded := loaded.Snapshot()
+	if len(reloaded) != 1 || reloaded[0].LogoHash != hash || !reloaded[0].LogoChecked {
+		t.Fatalf("loaded Snapshot() = %+v", reloaded)
+	}
+}
+
+func TestStoreResetLogoWhenDeclarationChanges(t *testing.T) {
+	first := declaration(t, privateKey, "1.0.0~ynh1")
+	policy, err := trust.NewExplicitPublishers([]string{first.PubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := New(policy)
+	if _, err := store.Apply(first); err != nil {
+		t.Fatal(err)
+	}
+	store.SetLogoResult(first.PubKey, "hello_nostr", publisher.HashBytes([]byte("logo-bytes")))
+
+	// Declarations are timestamped to the second; wait so the upgrade is
+	// strictly newer than the declaration currently projected.
+	time.Sleep(1100 * time.Millisecond)
+	second := declaration(t, privateKey, "1.1.0~ynh1")
+	if changed, err := store.Apply(second); err != nil || !changed {
+		t.Fatalf("Apply(upgrade) = (%v, %v)", changed, err)
+	}
+	entries := store.Snapshot()
+	if len(entries) != 1 || entries[0].LogoHash != "" || entries[0].LogoChecked {
+		t.Fatalf("changed declaration kept a stale logo: %+v", entries)
+	}
+}
+
+func TestBackfillLogosDisabledAndSkipsChecked(t *testing.T) {
+	event := declaration(t, privateKey, "1.0.0~ynh1")
+	policy, err := trust.NewExplicitPublishers([]string{event.PubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := New(policy)
+	if _, err := store.Apply(event); err != nil {
+		t.Fatal(err)
+	}
+	if updated := backfillLogos(context.Background(), store, ""); updated != 0 {
+		t.Fatalf("backfillLogos(disabled) = %d, want 0", updated)
+	}
+	store.SetLogoResult(event.PubKey, "hello_nostr", "")
+	if updated := backfillLogos(context.Background(), store, t.TempDir()); updated != 0 {
+		t.Fatalf("backfillLogos(checked) = %d, want 0", updated)
 	}
 }

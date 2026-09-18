@@ -46,6 +46,7 @@ func run(args []string) error {
 	publisherList := flags.String("publishers", "", "comma-separated trusted publisher hex keys or npubs")
 	relayList := flags.String("relay", "", "comma-separated relay ws:// or wss:// URLs (sync only)")
 	appID := flags.String("app-id", "", "app ID (reverify only)")
+	logoDir := flags.String("logo-dir", "/usr/share/yunohost/applogos", "directory for extracted app logos (empty disables)")
 	attestationPolicy := flags.String("attestation-policy", "off", "attestation policy mode (trust only): off|prefer|require")
 	minAttestations := flags.Int("min-attestations", 0, "minimum acceptable attestations to count a revision verified (trust only, 0 = default of 1)")
 	requiredChecks := flags.String("required-checks", "", "comma-separated required CI check names (trust only)")
@@ -84,7 +85,7 @@ func run(args []string) error {
 	case "publish":
 		return publish(*relayList, os.Stdin)
 	case "sync":
-		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList))
+		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir)
 	case "trust":
 		if flags.NArg() > 1 {
 			return errors.New("trust takes no arguments")
@@ -234,7 +235,7 @@ func publish(relayURLs string, input io.Reader) error {
 	return nil
 }
 
-func syncCatalog(statePath string, publishers, relayURLs []string) error {
+func syncCatalog(statePath string, publishers, relayURLs []string, logoDirectory string) error {
 	if len(relayURLs) == 0 {
 		return errors.New("sync requires --relay URL")
 	}
@@ -248,7 +249,7 @@ func syncCatalog(statePath string, publishers, relayURLs []string) error {
 	if err != nil {
 		return err
 	}
-	return catalog.Run(ctx, client, store, statePath)
+	return catalog.Run(ctx, client, store, statePath, logoDirectory)
 }
 
 func openStore(path string, publishers []string) (*catalog.Store, error) {

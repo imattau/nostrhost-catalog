@@ -271,14 +271,21 @@ func readLogo(directory string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read logo.png: %w", err)
 	}
+	return validLogo(data), nil
+}
+
+// validLogo returns the data only when it is a plausible PNG logo: non-empty,
+// within the 2 MiB cap, and carrying the PNG signature. Any other content is
+// treated as "no logo" rather than an error, since logos are cosmetic.
+func validLogo(data []byte) []byte {
 	if len(data) == 0 || len(data) > 2<<20 {
-		return nil, nil
+		return nil
 	}
 	magic := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
 	if len(data) < len(magic) || string(data[:len(magic)]) != string(magic) {
-		return nil, nil
+		return nil
 	}
-	return data, nil
+	return data
 }
 
 // LogoHash returns the YunoHost catalogue hash for an optional logo.
