@@ -38,7 +38,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|reverify")
+		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|reverify|rebuild|verify")
 	}
 	flags := flag.NewFlagSet("nostrhost-catalog", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -86,6 +86,13 @@ func run(args []string) error {
 		return publish(*relayList, os.Stdin)
 	case "sync":
 		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir)
+	case "rebuild":
+		// WP5: catalogue.json is disposable — refetch the whole history from
+		// the relay and overwrite it with a fresh projection.
+		return rebuildCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir, false)
+	case "verify":
+		// WP5: rebuild into a throwaway store and report drift, no write.
+		return rebuildCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir, true)
 	case "trust":
 		if flags.NArg() > 1 {
 			return errors.New("trust takes no arguments")
@@ -250,6 +257,73 @@ func syncCatalog(statePath string, publishers, relayURLs []string, logoDirectory
 		return err
 	}
 	return catalog.Run(ctx, client, store, statePath, logoDirectory)
+}
+
+// rebuildCatalog refetches the complete declaration + attestation history
+// from the relay into a *fresh* store. With verifyOnly it compares the fresh
+// digest to the on-disk projection and reports drift without writing; without
+// it, it overwrites the on-disk projection with the rebuilt one.
+func rebuildCatalog(statePath string, publishers, relayURLs []string, logoDirectory string, verifyOnly bool) error {
+	if len(relayURLs) == 0 {
+		return errors.New("rebuild/verify requires --relay URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	client, err := relay.New(ctx, relayURLs)
+	if err != nil {
+		return err
+	}
+	fresh, err := catalog.NewFromPublishers(publishers)
+	if err != nil {
+		return err
+	}
+	if verifyOnly {
+		declarations, attestations, err := catalog.Rebuild(ctx, client, fresh, logoDirectory)
+		if err != nil {
+			return err
+		}
+		rebuiltDigest, err := fresh.Canonical()
+		if err != nil {
+			return err
+		}
+		current, loadErr := openStore(statePath, publishers)
+		currentDigest := ""
+		if loadErr == nil {
+			currentDigest, err = current.Canonical()
+			if err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(loadErr) {
+			return loadErr
+		}
+		drift := currentDigest != rebuiltDigest
+		if err := writeJSON(os.Stdout, map[string]any{
+			"verified":       !drift,
+			"drift":          drift,
+			"current_digest": currentDigest,
+			"rebuilt_digest": rebuiltDigest,
+			"declarations":   declarations,
+			"attestations":   attestations,
+		}); err != nil {
+			return err
+		}
+		if drift {
+			return errors.New("catalogue projection differs from the relay rebuild")
+		}
+		return nil
+	}
+	declarations, attestations, err := catalog.Rebuild(ctx, client, fresh, logoDirectory)
+	if err != nil {
+		return err
+	}
+	if err := fresh.Save(statePath); err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, map[string]any{
+		"rebuilt":      true,
+		"declarations": declarations,
+		"attestations": attestations,
+	})
 }
 
 func openStore(path string, publishers []string) (*catalog.Store, error) {

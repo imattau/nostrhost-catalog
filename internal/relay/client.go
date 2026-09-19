@@ -83,7 +83,10 @@ func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) 
 	// multi-kind filter, and relay-side filtering is not a trust boundary in
 	// any case because Store.Apply still enforces the publisher allow-list.
 	for _, kind := range []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind} {
-		for _, event := range c.query(ctx, queryURLs, nostr.Filter{Kinds: []int{kind}}) {
+		// WP5: reconcile the complete set with NIP-77 rather than a single
+		// (truncated) unbounded REQ, so an older declaration survives a
+		// catalogue larger than the relay's default page.
+		for _, event := range c.fetchAll(ctx, queryURLs, nostr.Filter{Kinds: []int{kind}}) {
 			key := nostr.ReplaceableKey{PubKey: event.PubKey, D: event.Tags.GetD()}
 			if current, ok := latest[key]; !ok || event.CreatedAt > current.CreatedAt {
 				latest[key] = event
@@ -100,7 +103,8 @@ func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) 
 // FetchAttestations fetches CI attestation events for replay into the local
 // projection. Trust and declaration matching are enforced by Store.
 func (c *Client) FetchAttestations(ctx context.Context) []*nostr.Event {
-	return c.query(ctx, c.urls, nostr.Filter{Kinds: []int{verification.AttestationKind}})
+	// WP5: NIP-77 reconciliation so older attestations are not truncated.
+	return c.fetchAll(ctx, c.urls, nostr.Filter{Kinds: []int{verification.AttestationKind}})
 }
 
 // discoverRelayURLs reads NIP-65 publisher relay lists and NIP-66 relay
