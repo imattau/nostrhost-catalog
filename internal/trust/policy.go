@@ -57,5 +57,8 @@ func (p ExplicitPublishers) Validate(event nostr.Event) (protocol.AppDeclaration
 	if err := protocol.VerifySignature(event); err != nil {
 		return protocol.AppDeclaration{}, err
 	}
+	if event.Kind == protocol.NpackReleaseKind {
+		return protocol.ParseFromNpackRelease(event)
+	}
 	return protocol.ParseAppDeclaration(event)
 }

@@ -82,7 +82,7 @@ func (c *Client) FetchAppDeclarations(ctx context.Context, publishers []string) 
 	// Fetch declaration kinds separately. Some local relays mishandle a
 	// multi-kind filter, and relay-side filtering is not a trust boundary in
 	// any case because Store.Apply still enforces the publisher allow-list.
-	for _, kind := range []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind} {
+	for _, kind := range []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind, protocol.NpackReleaseKind} {
 		// WP5: reconcile the complete set with NIP-77 rather than a single
 		// (truncated) unbounded REQ, so an older declaration survives a
 		// catalogue larger than the relay's default page.
@@ -234,7 +234,7 @@ func (c *Client) Publish(ctx context.Context, event nostr.Event) []PublishResult
 // provided by the SDK's pool.
 func (c *Client) SubscribeAppDeclarations(ctx context.Context) <-chan nostr.RelayEvent {
 	return c.pool.SubscribeMany(ctx, c.urls, nostr.Filter{
-		Kinds: []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind},
+		Kinds: []int{protocol.AppDeclarationKind, protocol.LegacyAppDeclarationKind, protocol.NpackReleaseKind},
 	})
 }
 

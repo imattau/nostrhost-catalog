@@ -17,6 +17,12 @@ const (
 	// Exact YunoHost release hashes remain extension tags.
 	AppDeclarationKind       int = 32267
 	LegacyAppDeclarationKind int = 30078
+	// NpackReleaseKind is npack's own signed package-release event (see
+	// forks/npack in the nostrhost repo). It carries a different tag shape
+	// than AppDeclarationKind (no manifest-hash equivalent - see
+	// ParseFromNpackRelease) but the same trust/curation/attestation
+	// machinery below applies to it once parsed into an AppDeclaration.
+	NpackReleaseKind int = 9900
 )
 
 // ProfileKind and NoteKind are the standard NIP-01 kinds used to make a
@@ -152,6 +158,81 @@ func ParseAppDeclaration(event Event) (AppDeclaration, error) {
 	return declaration, nil
 }
 
+// ParseFromNpackRelease adapts a signed npack kind-9900 release event (see
+// forks/npack/npack-cli/src/main.rs's sign_release_event) into the same
+// AppDeclaration shape ParseAppDeclaration produces, so the rest of the
+// catalogue (trust, curation, attestation, Store) operates on npack releases
+// identically to kind-32267 declarations. It does not reuse parseTags, which
+// enforces kind-32267-specific required tags ("d", "manifest", "content",
+// "platform") that npack releases don't carry.
+//
+// ManifestHash is left empty: npack's signed event has no field covering
+// nostrhost's own embedded native-manifest hash (that hash is computed
+// locally when staging, entirely outside what npack itself signs). Callers
+// matching on ManifestHash (see Store.AttestationsFor) must treat an empty
+// value as "not checked", not "must equal empty".
+//
+// Repository is a NIP-34 kind:30617 address ("30617:<pubkey>:<identifier>"),
+// not the HTTPS URL kind-32267 declarations use - npack's own release
+// signing rejects any other repo format (validate_repo_reference in
+// sign_release_event), so a publisher needs an existing NIP-34
+// git-repository announcement to make a release attestable at all.
+func ParseFromNpackRelease(event Event) (AppDeclaration, error) {
+	if event.Kind != NpackReleaseKind {
+		return AppDeclaration{}, fmt.Errorf("unexpected event kind %d", event.Kind)
+	}
+	if event.CreatedAt <= 0 {
+		return AppDeclaration{}, fmt.Errorf("created_at must be positive")
+	}
+	if !Hex64Pattern.MatchString(event.PubKey) {
+		return AppDeclaration{}, fmt.Errorf("pubkey must be 64 lowercase hexadecimal characters")
+	}
+	if !Hex64Pattern.MatchString(event.ID) || !hex128Pattern.MatchString(event.Sig) {
+		return AppDeclaration{}, fmt.Errorf("id must be 64 and sig must be 128 lowercase hexadecimal characters")
+	}
+
+	tags := make(map[string]string, len(event.Tags))
+	for _, tag := range event.Tags {
+		if len(tag) < 2 || tag[0] == "" || tag[1] == "" {
+			continue
+		}
+		if _, exists := tags[tag[0]]; !exists {
+			tags[tag[0]] = tag[1]
+		}
+	}
+
+	appID := tags["name"]
+	if !appIDPattern.MatchString(appID) {
+		return AppDeclaration{}, fmt.Errorf("invalid app ID %q", appID)
+	}
+	version := tags["version"]
+	if version == "" {
+		return AppDeclaration{}, fmt.Errorf("release declares no version")
+	}
+	repository := tags["repo"]
+	if err := validateNip34RepoReference(repository); err != nil {
+		return AppDeclaration{}, fmt.Errorf("npack release has no attestable repo/commit provenance: %w", err)
+	}
+	commit := tags["commit"]
+	if !CommitPattern.MatchString(commit) {
+		return AppDeclaration{}, fmt.Errorf("npack release has no attestable repo/commit provenance: commit must be 40-64 lowercase hexadecimal characters")
+	}
+	contentHash := "sha256:" + tags["x"]
+	if err := ValidateHash("content", contentHash); err != nil {
+		return AppDeclaration{}, err
+	}
+
+	return AppDeclaration{
+		AppID:       appID,
+		Publisher:   event.PubKey,
+		Repository:  repository,
+		Version:     version,
+		Commit:      commit,
+		ContentHash: contentHash,
+		Name:        appID,
+	}, nil
+}
+
 // VerifyID checks the event ID using the SDK's NIP-01 implementation.
 func VerifyID(event Event) error {
 	if !event.CheckID() {
@@ -198,6 +279,27 @@ func validateRepository(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path == "" {
 		return fmt.Errorf("repo must be an HTTPS repository URL")
+	}
+	return nil
+}
+
+// validateNip34RepoReference checks npack's own repo format: a NIP-34
+// kind:30617 address ("30617:<pubkey>:<identifier>"), not the HTTPS URL
+// kind-32267 declarations use (see validateRepository). npack itself
+// rejects any other shape when building a release (validate_repo_reference
+// in forks/npack/npack-cli/src/main.rs), so an npack release's repo tag is
+// always this format, never a bare URL - a publisher needs an existing
+// NIP-34 git-repository announcement event to make a release attestable.
+func validateNip34RepoReference(raw string) error {
+	parts := strings.SplitN(raw, ":", 3)
+	if len(parts) != 3 || parts[0] != "30617" {
+		return fmt.Errorf("repo must be a NIP-34 kind:30617 address (30617:<pubkey>:<identifier>)")
+	}
+	if !Hex64Pattern.MatchString(parts[1]) {
+		return fmt.Errorf("repo publisher must be a 64-character lowercase hexadecimal Nostr key")
+	}
+	if parts[2] == "" {
+		return fmt.Errorf("repo is missing its identifier")
 	}
 	return nil
 }

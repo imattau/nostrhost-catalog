@@ -127,6 +127,65 @@ func TestStoreAttestationPolicyMatchesExactRevision(t *testing.T) {
 	}
 }
 
+func npackReleaseEvent(t *testing.T, privateKey string) nostr.Event {
+	t.Helper()
+	publicKey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := nostr.Event{
+		CreatedAt: nostr.Timestamp(1),
+		Kind:      protocol.NpackReleaseKind,
+		Tags: nostr.Tags{
+			{"d", "hello_nostr/1.0.0/x86_64"},
+			{"name", "hello_nostr"},
+			{"version", "1.0.0"},
+			{"x", publisher.HashBytes([]byte("content"))[len("sha256:"):]},
+			{"repo", "30617:" + publicKey + ":hello_nostr_ynh"},
+			{"commit", "cccccccccccccccccccccccccccccccccccccccc"},
+		},
+		PubKey: publicKey,
+	}
+	if err := event.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func TestStoreAttestationPolicyMatchesNpackReleaseWithNoManifestHash(t *testing.T) {
+	// npack releases have no manifest-hash equivalent (ParseFromNpackRelease
+	// leaves it empty); AttestationsFor must still match on
+	// (app_id, repo, commit, content_hash) alone.
+	event := npackReleaseEvent(t, privateKey)
+	declarationData, err := protocol.ParseFromNpackRelease(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declarationData.ManifestHash != "" {
+		t.Fatalf("expected empty ManifestHash for an npack-sourced declaration, got %q", declarationData.ManifestHash)
+	}
+	attestationEvent, err := verification.Build(declarationData.AppID, declarationData.Repository, declarationData.Commit, publisher.HashBytes([]byte("some-manifest")), declarationData.ContentHash, "test-ci", "run-1", map[string]string{"package_check": "pass"}, "pass", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := trust.NewExplicitPublishers([]string{event.PubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := New(policy)
+	if _, err := store.Apply(event); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.ApplyAttestation(attestationEvent); err != nil || !changed {
+		t.Fatalf("ApplyAttestation() = (%v, %v)", changed, err)
+	}
+	attestationPolicy := trust.AttestationPolicy{Mode: trust.AttestationRequire, RequiredChecks: []string{"package_check"}}
+	resolved, decision, ok := store.ResolveInstallable("hello_nostr", attestationPolicy)
+	if !ok || !decision.Verified || resolved.Version != "1.0.0" {
+		t.Fatalf("ResolveInstallable() = (%+v, %+v, %v)", resolved, decision, ok)
+	}
+}
+
 func TestStoreRecordsAndPersistsLogoResult(t *testing.T) {
 	event := declaration(t, privateKey, "1.0.0~ynh1")
 	policy, err := trust.NewExplicitPublishers([]string{event.PubKey})

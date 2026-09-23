@@ -63,12 +63,17 @@ func (s *Store) ApplyAttestation(event nostr.Event) (bool, error) {
 }
 
 // AttestationsFor returns attestations matching the declaration's complete
-// repository and content identity, not merely its app ID or commit.
+// repository and content identity, not merely its app ID or commit. A
+// declaration with no ManifestHash (an npack release - see
+// protocol.ParseFromNpackRelease, which has no signed equivalent to check)
+// skips that comparison rather than requiring attestations to also have an
+// empty ManifestHash.
 func (s *Store) AttestationsFor(declaration protocol.AppDeclaration) []verification.Attestation {
 	result := make([]verification.Attestation, 0)
 	for _, entry := range s.attestations {
 		a := entry.Attestation
-		if a.AppID == declaration.AppID && a.Repository == declaration.Repository && a.Commit == declaration.Commit && a.ManifestHash == declaration.ManifestHash && a.ContentHash == declaration.ContentHash {
+		manifestMatches := declaration.ManifestHash == "" || a.ManifestHash == declaration.ManifestHash
+		if a.AppID == declaration.AppID && a.Repository == declaration.Repository && a.Commit == declaration.Commit && manifestMatches && a.ContentHash == declaration.ContentHash {
 			result = append(result, a)
 		}
 	}
