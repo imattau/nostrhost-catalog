@@ -48,11 +48,11 @@ func (s *Store) Canonical() (string, error) {
 // "catalogue.json is disposable" path: the relay events are authoritative and
 // the file is only a derived read model. Returns how many declarations and
 // attestations were applied.
-func Rebuild(ctx context.Context, client *relay.Client, store *Store, logoDirectory string) (declarations int, attestations int, err error) {
+func Rebuild(ctx context.Context, client *relay.Client, store *Store) (declarations int, attestations int, err error) {
 	if client == nil || store == nil {
 		return 0, 0, fmt.Errorf("rebuild requires a relay client and store")
 	}
-	declarations, _ = Bootstrap(ctx, client, store, logoDirectory)
+	declarations, _ = Bootstrap(ctx, client, store)
 	attestations, _ = BootstrapAttestations(ctx, client, store)
 	return declarations, attestations, nil
 }

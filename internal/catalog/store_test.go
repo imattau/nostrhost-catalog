@@ -1,7 +1,6 @@
 package catalog
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -243,21 +242,3 @@ func TestStoreResetLogoWhenDeclarationChanges(t *testing.T) {
 	}
 }
 
-func TestBackfillLogosDisabledAndSkipsChecked(t *testing.T) {
-	event := declaration(t, privateKey, "1.0.0~ynh1")
-	policy, err := trust.NewExplicitPublishers([]string{event.PubKey})
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := New(policy)
-	if _, err := store.Apply(event); err != nil {
-		t.Fatal(err)
-	}
-	if updated := backfillLogos(context.Background(), store, ""); updated != 0 {
-		t.Fatalf("backfillLogos(disabled) = %d, want 0", updated)
-	}
-	store.SetLogoResult(event.PubKey, "hello_nostr", "")
-	if updated := backfillLogos(context.Background(), store, t.TempDir()); updated != 0 {
-		t.Fatalf("backfillLogos(checked) = %d, want 0", updated)
-	}
-}

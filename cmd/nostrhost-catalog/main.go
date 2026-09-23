@@ -17,17 +17,15 @@ import (
 	"github.com/imattau/nostrhost-catalog/internal/catalog"
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
 	"github.com/imattau/nostrhost-catalog/internal/relay"
-	"github.com/imattau/nostrhost-catalog/internal/repository"
 	"github.com/imattau/nostrhost-catalog/internal/trust"
 	"github.com/imattau/nostrhost-catalog/internal/verification"
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// reverifyTimeout bounds the on-demand git clone reverify performs - an
-// admin clicking the button waits synchronously for the response, so this
-// needs to be short enough not to look hung against a slow or unreachable
-// repository host.
-const reverifyTimeout = 20 * time.Second
+// fetchTimeout bounds an on-demand live relay fetch (attest-release) - a
+// caller waits synchronously for the response, so this needs to be short
+// enough not to look hung against a slow or unreachable relay.
+const fetchTimeout = 20 * time.Second
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -38,15 +36,13 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|attest-release|reverify|rebuild|verify")
+		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|attest-release|rebuild|verify")
 	}
 	flags := flag.NewFlagSet("nostrhost-catalog", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	statePath := flags.String("state", "/var/lib/nostrhost/catalogue.json", "projection state path")
 	publisherList := flags.String("publishers", "", "comma-separated trusted publisher hex keys or npubs")
 	relayList := flags.String("relay", "", "comma-separated relay ws:// or wss:// URLs (sync only)")
-	appID := flags.String("app-id", "", "app ID (reverify only)")
-	logoDir := flags.String("logo-dir", "/usr/share/yunohost/applogos", "directory for extracted app logos (empty disables)")
 	attestationPolicy := flags.String("attestation-policy", "off", "attestation policy mode (trust/attest-release only): off|prefer|require")
 	minAttestations := flags.Int("min-attestations", 0, "minimum acceptable attestations to count a revision verified (trust/attest-release only, 0 = default of 1)")
 	requiredChecks := flags.String("required-checks", "", "comma-separated required CI check names (trust/attest-release only)")
@@ -89,14 +85,14 @@ func run(args []string) error {
 	case "publish":
 		return publish(*relayList, os.Stdin)
 	case "sync":
-		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir)
+		return syncCatalog(*statePath, keys, splitNonEmpty(*relayList))
 	case "rebuild":
 		// WP5: catalogue.json is disposable — refetch the whole history from
 		// the relay and overwrite it with a fresh projection.
-		return rebuildCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir, false)
+		return rebuildCatalog(*statePath, keys, splitNonEmpty(*relayList), false)
 	case "verify":
 		// WP5: rebuild into a throwaway store and report drift, no write.
-		return rebuildCatalog(*statePath, keys, splitNonEmpty(*relayList), *logoDir, true)
+		return rebuildCatalog(*statePath, keys, splitNonEmpty(*relayList), true)
 	case "trust":
 		if flags.NArg() > 1 {
 			return errors.New("trust takes no arguments")
@@ -110,11 +106,6 @@ func run(args []string) error {
 			*releasePublisher, *releaseName, *releaseVersion, *releaseArch, keys, splitNonEmpty(*relayList),
 			*attestationPolicy, *minAttestations, splitNonEmpty(*requiredChecks), splitNonEmpty(*trustedVerifiers),
 		)
-	case "reverify":
-		if flags.NArg() > 1 {
-			return errors.New("reverify takes no arguments")
-		}
-		return runReverify(store, *appID)
 	default:
 		return fmt.Errorf("unknown command %q", flags.Arg(0))
 	}
@@ -184,7 +175,7 @@ func runAttestRelease(publisher, name, version, arch string, trustedPublishers, 
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), reverifyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 	client, err := relay.New(ctx, relayURLs)
 	if err != nil {
@@ -221,46 +212,6 @@ func runAttestRelease(publisher, name, version, arch string, trustedPublishers, 
 		Verified:     decision.Verified,
 		Accepted:     decision.Accepted,
 	})
-}
-
-// runReverify independently re-checks one accepted declaration on demand: it
-// re-clones the repository fresh at the declared commit and recomputes both
-// hashes, rather than trusting whatever was true at ingestion time. This
-// performs real outbound network I/O (a git clone) but only ever against a
-// repository already accepted into this projection - appID selects which
-// already-trusted revision to re-check, it cannot name an arbitrary
-// repository.
-func runReverify(store *catalog.Store, appID string) error {
-	if appID == "" {
-		return errors.New("reverify requires --app-id")
-	}
-	declaration, ok := store.Resolve(appID)
-	if !ok {
-		return fmt.Errorf("app %q was not found", appID)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), reverifyTimeout)
-	defer cancel()
-	verified, verifyErr := repository.VerifyDeclaration(ctx, declaration)
-	result := map[string]any{
-		"app_id":     appID,
-		"publisher":  declaration.Publisher,
-		"commit":     declaration.Commit,
-		"repository": declaration.Repository,
-		"ok":         verifyErr == nil,
-	}
-	if verifyErr != nil {
-		result["error"] = verifyErr.Error()
-	} else {
-		result["manifest"] = verified.Manifest
-		result["branch"] = verified.Branch
-	}
-	if err := writeJSON(os.Stdout, result); err != nil {
-		return err
-	}
-	if verifyErr != nil {
-		return fmt.Errorf("reverify: %w", verifyErr)
-	}
-	return nil
 }
 
 type publishResult struct {
@@ -322,7 +273,7 @@ func publish(relayURLs string, input io.Reader) error {
 	return nil
 }
 
-func syncCatalog(statePath string, publishers, relayURLs []string, logoDirectory string) error {
+func syncCatalog(statePath string, publishers, relayURLs []string) error {
 	if len(relayURLs) == 0 {
 		return errors.New("sync requires --relay URL")
 	}
@@ -336,14 +287,14 @@ func syncCatalog(statePath string, publishers, relayURLs []string, logoDirectory
 	if err != nil {
 		return err
 	}
-	return catalog.Run(ctx, client, store, statePath, logoDirectory)
+	return catalog.Run(ctx, client, store, statePath)
 }
 
 // rebuildCatalog refetches the complete declaration + attestation history
 // from the relay into a *fresh* store. With verifyOnly it compares the fresh
 // digest to the on-disk projection and reports drift without writing; without
 // it, it overwrites the on-disk projection with the rebuilt one.
-func rebuildCatalog(statePath string, publishers, relayURLs []string, logoDirectory string, verifyOnly bool) error {
+func rebuildCatalog(statePath string, publishers, relayURLs []string, verifyOnly bool) error {
 	if len(relayURLs) == 0 {
 		return errors.New("rebuild/verify requires --relay URL")
 	}
@@ -358,7 +309,7 @@ func rebuildCatalog(statePath string, publishers, relayURLs []string, logoDirect
 		return err
 	}
 	if verifyOnly {
-		declarations, attestations, err := catalog.Rebuild(ctx, client, fresh, logoDirectory)
+		declarations, attestations, err := catalog.Rebuild(ctx, client, fresh)
 		if err != nil {
 			return err
 		}
@@ -392,7 +343,7 @@ func rebuildCatalog(statePath string, publishers, relayURLs []string, logoDirect
 		}
 		return nil
 	}
-	declarations, attestations, err := catalog.Rebuild(ctx, client, fresh, logoDirectory)
+	declarations, attestations, err := catalog.Rebuild(ctx, client, fresh)
 	if err != nil {
 		return err
 	}
