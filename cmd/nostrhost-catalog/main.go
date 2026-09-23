@@ -38,7 +38,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|reverify|rebuild|verify")
+		return errors.New("usage: nostrhost-catalog [--state PATH] [--publishers KEYS] [--relay URLS] ingest|list|get APP_ID|publish|sync|trust|attest-release|reverify|rebuild|verify")
 	}
 	flags := flag.NewFlagSet("nostrhost-catalog", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -47,10 +47,14 @@ func run(args []string) error {
 	relayList := flags.String("relay", "", "comma-separated relay ws:// or wss:// URLs (sync only)")
 	appID := flags.String("app-id", "", "app ID (reverify only)")
 	logoDir := flags.String("logo-dir", "/usr/share/yunohost/applogos", "directory for extracted app logos (empty disables)")
-	attestationPolicy := flags.String("attestation-policy", "off", "attestation policy mode (trust only): off|prefer|require")
-	minAttestations := flags.Int("min-attestations", 0, "minimum acceptable attestations to count a revision verified (trust only, 0 = default of 1)")
-	requiredChecks := flags.String("required-checks", "", "comma-separated required CI check names (trust only)")
-	trustedVerifiers := flags.String("trusted-verifiers", "", "comma-separated trusted attestation verifier keys (trust only; prefer/require refuse to start without at least one - empty means trust nobody)")
+	attestationPolicy := flags.String("attestation-policy", "off", "attestation policy mode (trust/attest-release only): off|prefer|require")
+	minAttestations := flags.Int("min-attestations", 0, "minimum acceptable attestations to count a revision verified (trust/attest-release only, 0 = default of 1)")
+	requiredChecks := flags.String("required-checks", "", "comma-separated required CI check names (trust/attest-release only)")
+	releasePublisher := flags.String("publisher", "", "npack release publisher hex key or npub (attest-release only)")
+	releaseName := flags.String("name", "", "npack release name (attest-release only)")
+	releaseVersion := flags.String("version", "", "npack release version (attest-release only)")
+	releaseArch := flags.String("arch", "x86_64", "npack release architecture (attest-release only)")
+	trustedVerifiers := flags.String("trusted-verifiers", "", "comma-separated trusted attestation verifier keys (trust/attest-release only; prefer/require refuse to start without at least one - empty means trust nobody)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -98,6 +102,14 @@ func run(args []string) error {
 			return errors.New("trust takes no arguments")
 		}
 		return runTrust(store, *attestationPolicy, *minAttestations, splitNonEmpty(*requiredChecks), splitNonEmpty(*trustedVerifiers))
+	case "attest-release":
+		if flags.NArg() > 1 {
+			return errors.New("attest-release takes no arguments")
+		}
+		return runAttestRelease(
+			*releasePublisher, *releaseName, *releaseVersion, *releaseArch, keys, splitNonEmpty(*relayList),
+			*attestationPolicy, *minAttestations, splitNonEmpty(*requiredChecks), splitNonEmpty(*trustedVerifiers),
+		)
 	case "reverify":
 		if flags.NArg() > 1 {
 			return errors.New("reverify takes no arguments")
@@ -141,6 +153,74 @@ func runTrust(store *catalog.Store, mode string, minAttestations int, requiredCh
 		})
 	}
 	return writeJSON(os.Stdout, entries)
+}
+
+// runAttestRelease is runTrust scoped to one npack release the operator is
+// about to install, identified by publisher/name/version/arch rather than
+// read from the local relay-synced projection (an npack release may never
+// have been synced - app install-npk resolves it live, so this does too:
+// fetch the one release event and its attestations, evaluate the same
+// policy runTrust does, print the same shape). trustedPublishers is the
+// same --publishers trust list every other subcommand uses; an untrusted
+// release's own signature check fails inside Store.Apply exactly as it
+// does for ingest.
+func runAttestRelease(publisher, name, version, arch string, trustedPublishers, relayURLs []string, mode string, minAttestations int, requiredChecks, trustedVerifiers []string) error {
+	if name == "" || version == "" {
+		return errors.New("attest-release requires --name and --version")
+	}
+	publisherKey, err := protocol.NormalizePublicKey(publisher)
+	if err != nil {
+		return fmt.Errorf("--publisher: %w", err)
+	}
+	if len(relayURLs) == 0 {
+		return errors.New("attest-release requires --relay URL")
+	}
+	parsedMode, err := trust.ParseAttestationMode(mode)
+	if err != nil {
+		return err
+	}
+	policy, err := trust.NewAttestationPolicy(parsedMode, minAttestations, requiredChecks, trustedVerifiers)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), reverifyTimeout)
+	defer cancel()
+	client, err := relay.New(ctx, relayURLs)
+	if err != nil {
+		return err
+	}
+	event, err := client.FetchReplaceable(ctx, protocol.NpackReleaseKind, publisherKey, fmt.Sprintf("%s/%s/%s", name, version, arch))
+	if err != nil {
+		return fmt.Errorf("fetch npack release: %w", err)
+	}
+
+	store, err := catalog.NewFromPublishers(trustedPublishers)
+	if err != nil {
+		return err
+	}
+	if _, err := store.Apply(*event); err != nil {
+		return err
+	}
+	for _, attestationEvent := range client.FetchAttestations(ctx) {
+		// Errors here are ordinary noise (an unrelated or malformed
+		// attestation on the relay) - AttestationsFor's own matching is the
+		// real filter, so keep collecting the rest rather than aborting.
+		_, _ = store.ApplyAttestation(*attestationEvent)
+	}
+
+	declaration, ok := store.Resolve(name)
+	if !ok {
+		return fmt.Errorf("release %s/%s@%s was fetched but could not be resolved", publisherKey, name, version)
+	}
+	attestations := store.AttestationsFor(declaration)
+	decision := policy.Evaluate(attestations)
+	return writeJSON(os.Stdout, trustEntry{
+		Declaration:  declaration,
+		Attestations: attestations,
+		Verified:     decision.Verified,
+		Accepted:     decision.Accepted,
+	})
 }
 
 // runReverify independently re-checks one accepted declaration on demand: it
