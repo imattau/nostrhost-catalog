@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -75,5 +76,40 @@ func TestFetchAllFallsBackWhenNegentropyUnsupported(t *testing.T) {
 	got := c.FetchAll(context.Background(), nostr.Filter{Kinds: []int{32267}})
 	if len(got) != 0 {
 		t.Fatalf("FetchAll fallback returned %d events, want 0 from an unreachable relay", len(got))
+	}
+}
+
+// TestFetchAllSurvivesAStuckRelay reproduces the live-observed hang: a relay
+// whose negentropy sync never returns and ignores the context it was given
+// (go-nostr's nip77.NegentropySync has been seen blocking on a channel
+// receive indefinitely against a relay that never completes the handshake).
+// A second, working relay must still contribute its events - one stuck relay
+// must not wedge fetchAll (and by extension catalog.Bootstrap) forever.
+func TestFetchAllSurvivesAStuckRelay(t *testing.T) {
+	original := nostrNegentropySync
+	originalTimeout := negentropyTimeout
+	defer func() {
+		nostrNegentropySync = original
+		negentropyTimeout = originalTimeout
+	}()
+	negentropyTimeout = 20 * time.Millisecond
+	nostrNegentropySync = func(ctx context.Context, store nostr.RelayStore, url string, filter nostr.Filter) error {
+		if url == "ws://stuck" {
+			<-make(chan struct{}) // never returns, and ignores ctx - the observed bug
+		}
+		return store.Publish(ctx, nostr.Event{ID: "ok", Kind: 32267, CreatedAt: 1})
+	}
+
+	c := &Client{urls: []string{"ws://stuck", "ws://working"}}
+	done := make(chan []*nostr.Event, 1)
+	go func() { done <- c.FetchAll(context.Background(), nostr.Filter{Kinds: []int{32267}}) }()
+
+	select {
+	case got := <-done:
+		if len(got) != 1 || got[0].ID != "ok" {
+			t.Fatalf("FetchAll returned %v, want the working relay's event despite the stuck one", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FetchAll did not return within 2s - a stuck relay blocked the whole batch")
 	}
 }

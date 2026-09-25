@@ -79,10 +79,9 @@ func (c *Client) fetchAll(ctx context.Context, urls []string, filter nostr.Filte
 	store := &memoryStore{}
 	var lastErr error
 	for _, url := range urls {
-		syncCtx, cancel := context.WithTimeout(ctx, negentropyTimeout)
-		err := nostrNegentropySync(syncCtx, store, url, filter)
-		cancel()
-		if err != nil {
+		if err := runWithDeadline(ctx, negentropyTimeout, func(syncCtx context.Context) error {
+			return nostrNegentropySync(syncCtx, store, url, filter)
+		}); err != nil {
 			lastErr = err
 			log.Printf("catalogue relay %s: negentropy sync: %v", url, err)
 		}
@@ -103,6 +102,32 @@ var nostrNegentropySync = func(ctx context.Context, store nostr.RelayStore, url 
 	return nip77.NegentropySync(ctx, store, url, filter, nip77.Down)
 }
 
+// runWithDeadline bounds fn to timeout even when fn itself does not honour
+// context cancellation. This matters here: go-nostr's nip77.NegentropySync
+// has been observed to block indefinitely on a channel receive against a
+// relay that doesn't complete the negentropy handshake (seen live against
+// this project's own local relay, which fully hung Bootstrap() for hours -
+// no per-relay context.WithTimeout ever fired because the library's inner
+// wait loop doesn't select on ctx.Done()). Running fn in its own goroutine
+// and racing it against a real timer means one unresponsive relay can no
+// longer block every later relay in fetchAll's loop; the abandoned goroutine
+// leaks until (if ever) the relay connection itself unblocks it, which is a
+// bounded, per-relay-per-call cost worth paying to keep the sync loop live.
+func runWithDeadline(ctx context.Context, timeout time.Duration, fn func(context.Context) error) error {
+	syncCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- fn(syncCtx)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-syncCtx.Done():
+		return syncCtx.Err()
+	}
+}
+
 func slicesSortByCreatedAt(events []*nostr.Event) {
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].CreatedAt != events[j].CreatedAt {
@@ -114,5 +139,5 @@ func slicesSortByCreatedAt(events []*nostr.Event) {
 
 // negentropyTimeout bounds one relay's reconciliation so an unresponsive
 // relay cannot stall the others.
-const negentropyTimeout = 30 * time.Second
+var negentropyTimeout = 30 * time.Second
 
