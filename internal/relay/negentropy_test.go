@@ -37,6 +37,26 @@ func TestMemoryStorePublishAndQuery(t *testing.T) {
 	}
 }
 
+// TestMemoryStoreDeduplicatesByID guards against the live-observed OOM kill:
+// concurrent relays that carry the same globally-known event must not each
+// add their own copy - memory has to stay proportional to the distinct
+// event set, not (relay count * event count).
+func TestMemoryStoreDeduplicatesByID(t *testing.T) {
+	store := &memoryStore{}
+	for i := 0; i < 50; i++ {
+		// 50 "relays" all republishing the same 3 distinct event IDs.
+		for _, id := range []string{"a", "b", "c"} {
+			if err := store.Publish(context.Background(), nostr.Event{ID: id, Kind: 32267, CreatedAt: 1}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}
+	}
+	got := store.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("snapshot has %d events after 50x republishing 3 ids, want 3 (deduplicated)", len(got))
+	}
+}
+
 // TestFetchAllUsesNegentropyAndSorts verifies the pinned DOWN reconciliation
 // populates the store and the result is returned oldest-first.
 func TestFetchAllUsesNegentropyAndSorts(t *testing.T) {

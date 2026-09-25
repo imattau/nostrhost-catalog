@@ -17,15 +17,26 @@ import (
 // fetches the relay's complete matching set. This is the WP5 replacement for
 // an unbounded REQ, which the relay backend silently truncates to its default
 // page (badger MaxLimit/4) and which therefore drops older events.
+//
+// Deduplicated by event ID, not appended to a plain slice: fetchAll syncs
+// many relays concurrently (see fetchAllConcurrency), and public relays
+// heavily overlap in which globally-known events they carry - a live OOM
+// kill on the clean7 testbed (a 3.8GB VM) traced back to this store holding
+// the same widely-relayed events once per relay that returned them, across
+// tens of thousands of matching-kind events. Keying by ID keeps memory
+// proportional to the distinct event set, not (relay count * event count).
 type memoryStore struct {
 	mu     sync.Mutex
-	events []*nostr.Event
+	events map[string]*nostr.Event
 }
 
 func (s *memoryStore) Publish(_ context.Context, event nostr.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.events = append(s.events, &event)
+	if s.events == nil {
+		s.events = make(map[string]*nostr.Event)
+	}
+	s.events[event.ID] = &event
 	return nil
 }
 
@@ -33,10 +44,7 @@ func (s *memoryStore) QueryEvents(_ context.Context, _ nostr.Filter) (chan *nost
 	ch := make(chan *nostr.Event)
 	go func() {
 		defer close(ch)
-		s.mu.Lock()
-		snapshot := append([]*nostr.Event(nil), s.events...)
-		s.mu.Unlock()
-		for _, event := range snapshot {
+		for _, event := range s.snapshot() {
 			ch <- event
 		}
 	}()
@@ -44,10 +52,9 @@ func (s *memoryStore) QueryEvents(_ context.Context, _ nostr.Filter) (chan *nost
 }
 
 func (s *memoryStore) QuerySync(_ context.Context, filter nostr.Filter) ([]*nostr.Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*nostr.Event, 0, len(s.events))
-	for _, event := range s.events {
+	snapshot := s.snapshot()
+	out := make([]*nostr.Event, 0, len(snapshot))
+	for _, event := range snapshot {
 		if filter.Matches(event) {
 			out = append(out, event)
 		}
@@ -58,7 +65,11 @@ func (s *memoryStore) QuerySync(_ context.Context, filter nostr.Filter) ([]*nost
 func (s *memoryStore) snapshot() []*nostr.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]*nostr.Event(nil), s.events...)
+	out := make([]*nostr.Event, 0, len(s.events))
+	for _, event := range s.events {
+		out = append(out, event)
+	}
+	return out
 }
 
 // FetchAll reconciles the complete set of relay events matching filter using
