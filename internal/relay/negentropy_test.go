@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -86,12 +87,14 @@ func TestFetchAllFallsBackWhenNegentropyUnsupported(t *testing.T) {
 // A second, working relay must still contribute its events - one stuck relay
 // must not wedge fetchAll (and by extension catalog.Bootstrap) forever.
 func TestFetchAllSurvivesAStuckRelay(t *testing.T) {
-	original := nostrNegentropySync
+	// Deliberately not restoring nostrNegentropySync via defer: the whole
+	// point of this test is a goroutine that blocks forever and leaks past
+	// the test's own return, and every other test in this file sets its own
+	// nostrNegentropySync before calling fetchAll/FetchAll, so leaving this
+	// one in place is harmless - restoring it here would race the leaked
+	// goroutine's read of the var against this test's write to it.
 	originalTimeout := negentropyTimeout
-	defer func() {
-		nostrNegentropySync = original
-		negentropyTimeout = originalTimeout
-	}()
+	defer func() { negentropyTimeout = originalTimeout }()
 	negentropyTimeout = 20 * time.Millisecond
 	nostrNegentropySync = func(ctx context.Context, store nostr.RelayStore, url string, filter nostr.Filter) error {
 		if url == "ws://stuck" {
@@ -111,5 +114,39 @@ func TestFetchAllSurvivesAStuckRelay(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("FetchAll did not return within 2s - a stuck relay blocked the whole batch")
+	}
+}
+
+// TestFetchAllRunsRelaysConcurrently guards against regressing back to a
+// serial relay loop. A NIP-65/66-discovered relay set can reach into the
+// hundreds; live-observed against real discovered relays, a serial pass at
+// ~30s/relay took well over half an hour. Here 40 relays each take 50ms -
+// serially that is 2s, so a wall-clock budget well under that (400ms) only
+// passes if fetchAll actually overlaps the calls.
+func TestFetchAllRunsRelaysConcurrently(t *testing.T) {
+	original := nostrNegentropySync
+	defer func() { nostrNegentropySync = original }()
+	const relayCount = 40
+	const perRelay = 50 * time.Millisecond
+	nostrNegentropySync = func(ctx context.Context, store nostr.RelayStore, url string, filter nostr.Filter) error {
+		time.Sleep(perRelay)
+		return store.Publish(ctx, nostr.Event{ID: url, Kind: 32267, CreatedAt: 1})
+	}
+
+	urls := make([]string, relayCount)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("ws://relay-%d", i)
+	}
+	c := &Client{urls: urls}
+
+	start := time.Now()
+	got := c.FetchAll(context.Background(), nostr.Filter{Kinds: []int{32267}})
+	elapsed := time.Since(start)
+
+	if len(got) != relayCount {
+		t.Fatalf("FetchAll returned %d events, want %d (one per relay)", len(got), relayCount)
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Fatalf("FetchAll took %v for %d relays at %v each - relays are not running concurrently", elapsed, relayCount, perRelay)
 	}
 }

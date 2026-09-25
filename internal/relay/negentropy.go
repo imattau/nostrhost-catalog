@@ -75,17 +75,40 @@ func (c *Client) FetchAll(ctx context.Context, filter nostr.Filter) []*nostr.Eve
 
 // fetchAll reconciles against an explicit URL list (declarations may add
 // NIP-65-discovered publisher relays on top of the configured set).
+//
+// URLs are synced concurrently, bounded by fetchAllConcurrency: a serial loop
+// over a NIP-65/66-discovered relay set can easily reach into the hundreds
+// of URLs, and at negentropyTimeout=30s per relay a serial pass takes
+// (relay count * 30s) - live-observed taking well over half an hour against
+// a real discovered set, which starves the whole sync loop (Bootstrap must
+// finish this call before Run() ever reaches the live subscribe/apply loop
+// that would otherwise pick up new declarations). Bounding concurrency
+// rather than firing every relay at once keeps the local machine from
+// opening hundreds of simultaneous websocket connections.
 func (c *Client) fetchAll(ctx context.Context, urls []string, filter nostr.Filter) []*nostr.Event {
 	store := &memoryStore{}
+	var mu sync.Mutex
 	var lastErr error
+	sem := make(chan struct{}, fetchAllConcurrency)
+	var wg sync.WaitGroup
 	for _, url := range urls {
-		if err := runWithDeadline(ctx, negentropyTimeout, func(syncCtx context.Context) error {
-			return nostrNegentropySync(syncCtx, store, url, filter)
-		}); err != nil {
-			lastErr = err
-			log.Printf("catalogue relay %s: negentropy sync: %v", url, err)
-		}
+		url := url
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := runWithDeadline(ctx, negentropyTimeout, func(syncCtx context.Context) error {
+				return nostrNegentropySync(syncCtx, store, url, filter)
+			}); err != nil {
+				mu.Lock()
+				lastErr = err
+				mu.Unlock()
+				log.Printf("catalogue relay %s: negentropy sync: %v", url, err)
+			}
+		}()
 	}
+	wg.Wait()
 	if len(store.snapshot()) == 0 && lastErr != nil {
 		// Negentropy unavailable or failed on every relay: fall back to the
 		// legacy query so the caller still gets a (bounded) result.
@@ -95,6 +118,9 @@ func (c *Client) fetchAll(ctx context.Context, urls []string, filter nostr.Filte
 	slicesSortByCreatedAt(events)
 	return events
 }
+
+// fetchAllConcurrency bounds how many relays fetchAll syncs at once.
+const fetchAllConcurrency = 16
 
 // nostrNegentropySync is a package-level indirection so tests can substitute
 // the reconciliation without a live relay.

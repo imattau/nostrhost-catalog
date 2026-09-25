@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/url"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/imattau/nostrhost-catalog/internal/protocol"
@@ -196,25 +197,40 @@ func isRelayURL(raw string) bool {
 // with both the local relay and public relays. Pool connections remain useful
 // for publication and live subscriptions.
 func (c *Client) query(ctx context.Context, urls []string, filter nostr.Filter) []*nostr.Event {
+	var mu sync.Mutex
 	all := make([]*nostr.Event, 0)
+	sem := make(chan struct{}, fetchAllConcurrency)
+	var wg sync.WaitGroup
 	for _, url := range urls {
-		// Bound each historical query independently so one unavailable relay
-		// cannot hold up the rest of the configured/discovered relay set.
-		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		relay, err := nostr.RelayConnect(context.Background(), url)
-		if err != nil {
-			cancel()
-			log.Printf("catalogue relay %s: connect: %v", url, err)
-			continue
-		}
-		events, err := relay.QuerySync(queryCtx, filter)
-		cancel()
-		if err != nil {
-			log.Printf("catalogue relay %s: query: %v", url, err)
-			continue
-		}
-		all = append(all, events...)
+		url := url
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// Bound each historical query independently so one unavailable
+			// relay cannot hold up the rest of the configured/discovered
+			// relay set - and run them concurrently, since a NIP-65/66
+			// discovered relay set can reach into the hundreds, where even
+			// a bounded serial pass takes far too long.
+			queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			relay, err := nostr.RelayConnect(queryCtx, url)
+			if err != nil {
+				log.Printf("catalogue relay %s: connect: %v", url, err)
+				return
+			}
+			events, err := relay.QuerySync(queryCtx, filter)
+			if err != nil {
+				log.Printf("catalogue relay %s: query: %v", url, err)
+				return
+			}
+			mu.Lock()
+			all = append(all, events...)
+			mu.Unlock()
+		}()
 	}
+	wg.Wait()
 	return all
 }
 
