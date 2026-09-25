@@ -108,22 +108,31 @@ func (c *Client) FetchAttestations(ctx context.Context) []*nostr.Event {
 	return c.fetchAll(ctx, c.urls, nostr.Filter{Kinds: []int{verification.AttestationKind}})
 }
 
-// discoverRelayURLs reads NIP-65 publisher relay lists and NIP-66 relay
-// discovery events from the configured bootstrap relays. Discovery is
-// deliberately best-effort: discovered URLs are only additional read
+// discoverRelayURLs reads NIP-65 publisher relay lists from the configured
+// bootstrap relays, so a fetch also reaches relays a trusted publisher
+// declared but that this node doesn't otherwise have configured. Discovery
+// is deliberately best-effort: discovered URLs are only additional read
 // candidates, never a trust or installation decision.
+//
+// This deliberately does NOT also pull in NIP-66 relay-discovery events: a
+// kind-30166 query has no author scoping (NIP-66 events are published by
+// third-party relay monitors, about relays generally, not about our
+// publishers specifically), so it returns essentially every relay any
+// monitor has ever announced across the whole network - live-observed
+// pulling in 100+ unrelated relays for two trusted publishers, which then
+// each had to be synced (including several minutes of NIP-77 negentropy
+// reconciliation each), pushing this process past a 3.8GB test VM's memory
+// and getting it OOM-killed. NIP-65 already covers the legitimate need
+// (find a publisher's own relays) precisely; NIP-66 added only volume.
 func (c *Client) discoverRelayURLs(ctx context.Context, publishers []string) []string {
-	urls := make([]string, 0)
-	if len(publishers) > 0 {
-		events := c.query(ctx, c.urls, nostr.Filter{
-			Kinds:   []int{relayListKind},
-			Authors: publishers,
-		})
-		urls = appendUniqueRelayURLs(urls, relayURLsFromNIP65(events))
+	if len(publishers) == 0 {
+		return nil
 	}
-	return appendUniqueRelayURLs(urls, relayURLsFromNIP66(c.query(ctx, c.urls, nostr.Filter{
-		Kinds: []int{relayDiscoveryKind},
-	})))
+	events := c.query(ctx, c.urls, nostr.Filter{
+		Kinds:   []int{relayListKind},
+		Authors: publishers,
+	})
+	return relayURLsFromNIP65(events)
 }
 
 func relayURLsFromNIP65(events []*nostr.Event) []string {
